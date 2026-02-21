@@ -30,7 +30,7 @@ class GeminiError(Exception):
     pass
 
 
-class TimeoutError(GeminiError):
+class RequestTimeoutError(GeminiError):
     """
     Exception for request timeouts.
     """

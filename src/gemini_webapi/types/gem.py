@@ -27,10 +27,7 @@ class Gem(BaseModel):
     predefined: bool
 
     def __str__(self) -> str:
-        return (
-            f"Gem(id='{self.id}', name='{self.name}', description='{self.description}', "
-            f"prompt='{self.prompt}', predefined={self.predefined})"
-        )
+        return f"Gem(id='{self.id}', name='{self.name}', description='{self.description}', prompt='{self.prompt}', predefined={self.predefined})"
 
 
 class GemJar(dict[str, Gem]):
@@ -46,18 +43,16 @@ class GemJar(dict[str, Gem]):
 
         return self.values().__iter__()
 
-    def get(
-        self, id: str | None = None, name: str | None = None, default: Gem | None = None
-    ) -> Gem | None:
+    def get(self, gem_id: str | None = None, name: str | None = None, default: Gem | None = None) -> Gem | None:
         """
         Retrieves a gem by its id and/or name.
-        If both id and name are provided, returns the gem that matches both id and name.
-        If only id is provided, it's a direct lookup.
+        If both gem_id and name are provided, returns the gem that matches both.
+        If only gem_id is provided, it's a direct lookup.
         If only name is provided, it searches through the gems.
 
         Parameters
         ----------
-        id: `str`, optional
+        gem_id: `str`, optional
             The unique identifier of the gem to retrieve.
         name: `str`, optional
             The user-friendly name of the gem to retrieve.
@@ -72,37 +67,26 @@ class GemJar(dict[str, Gem]):
         Raises
         ------
         `AssertionError`
-            If neither id nor name is provided.
+            If neither gem_id nor name is provided.
         """
+        if gem_id is None and name is None:
+            raise ValueError("At least one of gem_id or name must be provided.")
 
-        assert not (
-            id is None and name is None
-        ), "At least one of gem id or name must be provided."
-
-        if id is not None:
-            gem_candidate = super().get(id)
-            if gem_candidate:
-                if name is not None:
-                    if gem_candidate.name == name:
-                        return gem_candidate
-                    else:
-                        return default
-                else:
-                    return gem_candidate
-            else:
+        if gem_id is not None:
+            gem_candidate = super().get(gem_id)
+            if not gem_candidate:
                 return default
-        elif name is not None:
-            for gem_obj in self.values():
-                if gem_obj.name == name:
-                    return gem_obj
+            if name is None or gem_candidate.name == name:
+                return gem_candidate
             return default
 
-        # Should be unreachable due to the assertion.
+        # name is not None (gem_id is None)
+        for gem_obj in self.values():
+            if gem_obj.name == name:
+                return gem_obj
         return default
 
-    def filter(
-        self, predefined: bool | None = None, name: str | None = None
-    ) -> "GemJar":
+    def filter(self, predefined: bool | None = None, name: str | None = None) -> "GemJar":
         """
         Returns a new `GemJar` containing gems that match the given filters.
 

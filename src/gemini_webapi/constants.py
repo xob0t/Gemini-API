@@ -49,23 +49,17 @@ class Model(Enum):
     UNSPECIFIED = ("unspecified", {}, False)
     G_3_0_PRO = (
         "gemini-3.0-pro",
-        {
-            "x-goog-ext-525001261-jspb": '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4],null,null,1]'
-        },
+        {"x-goog-ext-525001261-jspb": '[1,null,null,null,"9d8ca3786ebdfbea",null,null,0,[4],null,null,1]'},
         False,
     )
     G_3_0_FLASH = (
         "gemini-3.0-flash",
-        {
-            "x-goog-ext-525001261-jspb": '[1,null,null,null,"fbb127bbb056c959",null,null,0,[4],null,null,1]'
-        },
+        {"x-goog-ext-525001261-jspb": '[1,null,null,null,"fbb127bbb056c959",null,null,0,[4],null,null,1]'},
         False,
     )
     G_3_0_FLASH_THINKING = (
         "gemini-3.0-flash-thinking",
-        {
-            "x-goog-ext-525001261-jspb": '[1,null,null,null,"5bf011840784117a",null,null,0,[4],null,null,1]'
-        },
+        {"x-goog-ext-525001261-jspb": '[1,null,null,null,"5bf011840784117a",null,null,0,[4],null,null,1]'},
         False,
     )
 
@@ -80,21 +74,15 @@ class Model(Enum):
             if model.model_name == name:
                 return model
 
-        raise ValueError(
-            f"Unknown model name: {name}. Available models: {', '.join([model.model_name for model in cls])}"
-        )
+        raise ValueError(f"Unknown model name: {name}. Available models: {', '.join([model.model_name for model in cls])}")
 
     @classmethod
     def from_dict(cls, model_dict: dict):
         if "model_name" not in model_dict or "model_header" not in model_dict:
-            raise ValueError(
-                "When passing a custom model as a dictionary, 'model_name' and 'model_header' keys must be provided."
-            )
+            raise ValueError("When passing a custom model as a dictionary, 'model_name' and 'model_header' keys must be provided.")
 
         if not isinstance(model_dict["model_header"], dict):
-            raise ValueError(
-                "When passing a custom model as a dictionary, 'model_header' must be a dictionary containing valid header strings."
-            )
+            raise ValueError("When passing a custom model as a dictionary, 'model_header' must be a dictionary containing valid header strings.")
 
         custom_model = cls.UNSPECIFIED
         custom_model.model_name = model_dict["model_name"]

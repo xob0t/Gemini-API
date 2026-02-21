@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 
-from .image import Image
 from .candidate import Candidate
+from .image import Image
 
 
 class ModelOutput(BaseModel):
@@ -10,15 +10,16 @@ class ModelOutput(BaseModel):
 
     Parameters
     ----------
-    metadata: `list[str]`
-        List of chat metadata `[cid, rid, rcid]`, can be shorter than 3 elements, like `[cid, rid]` or `[cid]` only
+    metadata: `list[str | None]`
+        List of chat metadata `[cid, rid, rcid]`, can be shorter than 3 elements, like `[cid, rid]` or `[cid]` only.
+        Elements can be strings or None.
     candidates: `list[Candidate]`
         List of all candidates returned from gemini
     chosen: `int`, optional
         Index of the chosen candidate, by default will choose the first one
     """
 
-    metadata: list[str]
+    metadata: list[str | None]
     candidates: list[Candidate]
     chosen: int = 0
 

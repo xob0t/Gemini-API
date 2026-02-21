@@ -1,7 +1,8 @@
 import html
-from pydantic import BaseModel, field_validator
 
-from .image import Image, WebImage, GeneratedImage
+from pydantic import BaseModel, Field, field_validator
+
+from .image import GeneratedImage, Image, WebImage
 
 
 class Candidate(BaseModel):
@@ -27,18 +28,18 @@ class Candidate(BaseModel):
     text_delta: str | None = None
     thoughts: str | None = None
     thoughts_delta: str | None = None
-    web_images: list[WebImage] = []
-    generated_images: list[GeneratedImage] = []
+    web_images: list[WebImage] = Field(default_factory=list)
+    generated_images: list[GeneratedImage] = Field(default_factory=list)
 
     def __str__(self):
         return self.text
 
     def __repr__(self):
-        return f"Candidate(rcid='{self.rcid}', text='{len(self.text) <= 20 and self.text or self.text[:20] + '...'}', images={self.images})"
+        return f"Candidate(rcid='{self.rcid}', text='{(len(self.text) <= 20 and self.text) or self.text[:20] + '...'}', images={self.images})"
 
-    @field_validator("text", "thoughts")
+    @field_validator("text", "thoughts", mode="after")
     @classmethod
-    def decode_html(cls, value: str) -> str:
+    def decode_html(cls, value: str | None) -> str | None:
         """
         Auto unescape HTML entities in text/thoughts if any.
         """

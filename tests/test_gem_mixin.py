@@ -1,9 +1,9 @@
+import logging
 import os
 import random
 import unittest
-import logging
 
-from gemini_webapi import GeminiClient, set_log_level, logger
+from gemini_webapi import GeminiClient, logger, set_log_level
 from gemini_webapi.exceptions import AuthError
 
 logging.getLogger("asyncio").setLevel(logging.ERROR)
@@ -12,9 +12,7 @@ set_log_level("DEBUG")
 
 class TestGemMixin(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.geminiclient = GeminiClient(
-            os.getenv("SECURE_1PSID"), os.getenv("SECURE_1PSIDTS"), verify=False
-        )
+        self.geminiclient = GeminiClient(os.getenv("SECURE_1PSID"), os.getenv("SECURE_1PSIDTS"), verify=False)
 
         try:
             await self.geminiclient.init(auto_refresh=False)

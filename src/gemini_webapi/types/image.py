@@ -1,10 +1,9 @@
 import re
-from pathlib import Path
 from datetime import datetime
-from typing import Any
+from pathlib import Path
 
 from httpx import AsyncClient, Cookies, HTTPError
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from ..utils import logger
 
@@ -25,16 +24,15 @@ class Image(BaseModel):
         Proxy used when saving image.
     """
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     url: str
     title: str = "[Image]"
     alt: str = ""
     proxy: str | None = None
 
     def __str__(self):
-        return (
-            f"Image(title='{self.title}', alt='{self.alt}', "
-            f"url='{len(self.url) <= 20 and self.url or self.url[:8] + '...' + self.url[-12:]}')"
-        )
+        return f"Image(title='{self.title}', alt='{self.alt}', url='{(len(self.url) <= 20 and self.url) or self.url[:8] + '...' + self.url[-12:]}')"
 
     async def save(
         self,
@@ -81,16 +79,12 @@ class Image(BaseModel):
             if skip_invalid_filename:
                 return None
 
-        async with AsyncClient(
-            http2=True, follow_redirects=True, cookies=cookies, proxy=self.proxy
-        ) as client:
+        async with AsyncClient(http2=True, follow_redirects=True, cookies=cookies, proxy=self.proxy) as client:
             response = await client.get(self.url)
             if response.status_code == 200:
                 content_type = response.headers.get("content-type")
                 if content_type and "image" not in content_type:
-                    logger.warning(
-                        f"Content type of {filename} is not image, but {content_type}."
-                    )
+                    logger.warning(f"Content type of {filename} is not image, but {content_type}.")
 
                 path = Path(path)
                 path.mkdir(parents=True, exist_ok=True)
@@ -103,9 +97,7 @@ class Image(BaseModel):
 
                 return str(dest.resolve())
             else:
-                raise HTTPError(
-                    f"Error downloading image: {response.status_code} {response.reason_phrase}"
-                )
+                raise HTTPError(f"Error downloading image: {response.status_code} {response.reason_phrase}")
 
 
 class WebImage(Image):
@@ -127,15 +119,13 @@ class GeneratedImage(Image):
         Should contain valid "__Secure-1PSID" and "__Secure-1PSIDTS" values.
     """
 
-    cookies: Any
+    cookies: dict[str, str] | Cookies
 
-    @field_validator("cookies")
+    @field_validator("cookies", mode="after")
     @classmethod
-    def validate_cookies(cls, v: Any) -> Any:
+    def validate_cookies(cls, v: dict[str, str] | Cookies) -> dict[str, str] | Cookies:
         if len(v) == 0:
-            raise ValueError(
-                "GeneratedImage is designed to be initialized with same cookies as GeminiClient."
-            )
+            raise ValueError("GeneratedImage is designed to be initialized with same cookies as GeminiClient.")
         return v
 
     # @override
@@ -178,8 +168,7 @@ class GeneratedImage(Image):
 
         return await super().save(
             path=path,
-            filename=filename
-            or f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{self.url[-10:]}.png",
+            filename=filename or f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{self.url[-10:]}.png",
             cookies=cookies or self.cookies,
             verbose=verbose,
             skip_invalid_filename=skip_invalid_filename,

@@ -1,25 +1,27 @@
 import asyncio
 import codecs
 import io
-import time
 import random
 import re
+import time
 from asyncio import Task
+from collections.abc import AsyncGenerator
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncGenerator, Optional
+from typing import Any, Optional
 
 import orjson as json
 from httpx import AsyncClient, Cookies, ReadTimeout, Response
 
 from .components import GemMixin
-from .constants import Endpoint, ErrorCode, GRPC, Headers, Model
+from .constants import GRPC, Endpoint, ErrorCode, Headers, Model
 from .exceptions import (
     APIError,
     AuthError,
     GeminiError,
     ModelInvalid,
+    RequestTimeoutError,
     TemporarilyBlocked,
-    TimeoutError,
     UsageLimitExceeded,
 )
 from .types import (
@@ -41,6 +43,93 @@ from .utils import (
     running,
     upload_file,
 )
+
+
+@dataclass(slots=True)
+class _StreamingState:
+    """Internal mutable state for tracking streaming progress across retries."""
+
+    last_texts: dict[str, str] = field(default_factory=dict)
+    last_thoughts: dict[str, str] = field(default_factory=dict)
+    last_progress_time: float = field(default_factory=time.time)
+
+
+@dataclass(slots=True)
+class _StreamFlags:
+    """Mutable flags tracking stream processing state."""
+
+    is_thinking: bool = False
+    is_queueing: bool = False
+    has_candidates: bool = False
+    is_completed: bool = False
+    is_final_chunk: bool = False
+
+
+def _raise_for_error_code(error_code: int, model_name: str) -> None:
+    """Raise appropriate exception for API error codes."""
+    match error_code:
+        case ErrorCode.USAGE_LIMIT_EXCEEDED:
+            raise UsageLimitExceeded(
+                f"Usage limit exceeded for model '{model_name}'. Please wait a few minutes, switch to a different model (e.g., Gemini Flash), or check your account limits on gemini.google.com."
+            )
+        case ErrorCode.MODEL_INCONSISTENT:
+            raise ModelInvalid("The specified model is inconsistent with the conversation history. Please ensure you are using the same 'model' parameter throughout the entire ChatSession.")
+        case ErrorCode.MODEL_HEADER_INVALID:
+            raise ModelInvalid(
+                f"The model '{model_name}' is currently unavailable or the request structure is outdated. "
+                "Please update 'gemini_webapi' to the latest version or report this on GitHub if the problem persists."
+            )
+        case ErrorCode.IP_TEMPORARILY_BLOCKED:
+            raise TemporarilyBlocked("Your IP address has been temporarily flagged or blocked by Google. Please try using a proxy, a different network, or wait for a while before retrying.")
+        case ErrorCode.TEMPORARY_ERROR_1013:
+            raise APIError("Gemini encountered a temporary error (1013). Retrying...")
+        case _:
+            raise APIError(f"Failed to generate contents (stream). Unknown API error code: {error_code}. This might be a temporary Google service issue.")
+
+
+def _parse_web_images(candidate_data: list[Any], proxy: str | None) -> list[WebImage]:
+    """Extract web images from candidate data."""
+    web_images = []
+    for web_img_data in get_nested_value(candidate_data, [12, 1], []):
+        url = get_nested_value(web_img_data, [0, 0, 0])
+        if url:
+            web_images.append(
+                WebImage(
+                    url=url,
+                    title=get_nested_value(web_img_data, [7, 0], ""),
+                    alt=get_nested_value(web_img_data, [0, 4], ""),
+                    proxy=proxy,
+                )
+            )
+    return web_images
+
+
+def _parse_generated_images(candidate_data: list[Any], proxy: str | None, cookies: Cookies) -> list[GeneratedImage]:
+    """Extract generated images from candidate data."""
+    generated_images = []
+    for gen_img_data in get_nested_value(candidate_data, [12, 7, 0], []):
+        url = get_nested_value(gen_img_data, [0, 3, 3])
+        if url:
+            img_num = get_nested_value(gen_img_data, [3, 6])
+            generated_images.append(
+                GeneratedImage(
+                    url=url,
+                    title=f"[Generated Image {img_num}]" if img_num else "[Generated Image]",
+                    alt=get_nested_value(gen_img_data, [3, 5, 0], ""),
+                    proxy=proxy,
+                    cookies=cookies,
+                )
+            )
+    return generated_images
+
+
+def _extract_candidate_text(candidate_data: list[Any]) -> str:
+    """Extract and clean text from candidate data."""
+    text = get_nested_value(candidate_data, [1, 0], "")
+    if re.match(r"^http://googleusercontent\.com/card_content/\d+", text):
+        text = get_nested_value(candidate_data, [22, 0]) or text
+    # Cleanup googleusercontent artifacts
+    return re.sub(r"http://googleusercontent\.com/\w+/\d+\n*", "", text)
 
 
 class GeminiClient(GemMixin):
@@ -69,26 +158,26 @@ class GeminiClient(GemMixin):
     """
 
     __slots__ = [
-        "cookies",
-        "proxy",
-        "_running",
-        "client",
-        "access_token",
-        "build_label",
-        "session_id",
-        "timeout",
-        "auto_close",
-        "close_delay",
-        "close_task",
-        "auto_refresh",
-        "refresh_interval",
-        "refresh_task",
-        "verbose",
-        "watchdog_timeout",
+        "_gems",  # From GemMixin
         "_lock",
         "_reqid",
-        "_gems",  # From GemMixin
+        "_running",
+        "access_token",
+        "auto_close",
+        "auto_refresh",
+        "build_label",
+        "client",
+        "close_delay",
+        "close_task",
+        "cookies",
         "kwargs",
+        "proxy",
+        "refresh_interval",
+        "refresh_task",
+        "session_id",
+        "timeout",
+        "verbose",
+        "watchdog_timeout",
     ]
 
     def __init__(
@@ -122,9 +211,7 @@ class GeminiClient(GemMixin):
         if secure_1psid:
             self.cookies.set("__Secure-1PSID", secure_1psid, domain=".google.com")
             if secure_1psidts:
-                self.cookies.set(
-                    "__Secure-1PSIDTS", secure_1psidts, domain=".google.com"
-                )
+                self.cookies.set("__Secure-1PSIDTS", secure_1psidts, domain=".google.com")
 
     async def init(
         self,
@@ -166,13 +253,11 @@ class GeminiClient(GemMixin):
             try:
                 self.verbose = verbose
                 self.watchdog_timeout = watchdog_timeout
-                access_token, build_label, session_id, valid_cookies = (
-                    await get_access_token(
-                        base_cookies=self.cookies,
-                        proxy=self.proxy,
-                        verbose=self.verbose,
-                        verify=self.kwargs.get("verify", True),
-                    )
+                access_token, build_label, session_id, valid_cookies = await get_access_token(
+                    base_cookies=self.cookies,
+                    proxy=self.proxy,
+                    verbose=self.verbose,
+                    verify=self.kwargs.get("verify", True),
                 )
 
                 self.client = AsyncClient(
@@ -265,9 +350,7 @@ class GeminiClient(GemMixin):
             try:
                 async with self._lock:
                     # Refresh all cookies in the background to keep the session alive.
-                    new_1psidts, rotated_cookies = await rotate_1psidts(
-                        self.cookies, self.proxy
-                    )
+                    new_1psidts, rotated_cookies = await rotate_1psidts(self.cookies, self.proxy)
                     if rotated_cookies:
                         self.cookies.update(rotated_cookies)
                         if self.client:
@@ -279,16 +362,11 @@ class GeminiClient(GemMixin):
                         else:
                             logger.debug("Cookies are up to date (cached).")
                     else:
-                        logger.warning(
-                            "Rotation response did not contain a new __Secure-1PSIDTS. "
-                            "Session might expire soon if this persists."
-                        )
+                        logger.warning("Rotation response did not contain a new __Secure-1PSIDTS. Session might expire soon if this persists.")
             except asyncio.CancelledError:
                 raise
             except AuthError:
-                logger.warning(
-                    "AuthError: Failed to refresh cookies. Retrying in next interval."
-                )
+                logger.warning("AuthError: Failed to refresh cookies. Retrying in next interval.")
             except Exception as e:
                 logger.warning(f"Unexpected error while refreshing cookies: {e}")
 
@@ -359,13 +437,8 @@ class GeminiClient(GemMixin):
                 ]
             )
 
-            uploaded_urls = await asyncio.gather(
-                *(upload_file(file, self.proxy) for file in files)
-            )
-            file_data = [
-                [[url], parse_file_name(file)]
-                for url, file in zip(uploaded_urls, files)
-            ]
+            uploaded_urls = await asyncio.gather(*(upload_file(file, self.proxy) for file in files))
+            file_data = [[[url], parse_file_name(file)] for url, file in zip(uploaded_urls, files, strict=True)]
 
         try:
             await self._batch_execute(
@@ -377,27 +450,21 @@ class GeminiClient(GemMixin):
                 ]
             )
 
-            session_state = {
-                "last_texts": {},
-                "last_thoughts": {},
-                "last_progress_time": time.time(),
-            }
-            output = None
-            async for output in self._generate(
+            streaming_state = _StreamingState()
+            output: ModelOutput | None = None
+            async for output in self._generate(  # noqa: B007 - output used after loop
                 prompt=prompt,
                 req_file_data=file_data,
                 model=model,
                 gem=gem,
                 chat=chat,
-                session_state=session_state,
+                streaming_state=streaming_state,
                 **kwargs,
             ):
-                pass
+                pass  # Consume generator to get final output; 'output' is used after loop
 
             if output is None:
-                raise GeminiError(
-                    "Failed to generate contents. No output data found in response."
-                )
+                raise GeminiError("Failed to generate contents. No output data found in response.")
 
             if isinstance(chat, ChatSession):
                 output.metadata = chat.metadata
@@ -473,13 +540,8 @@ class GeminiClient(GemMixin):
                 ]
             )
 
-            uploaded_urls = await asyncio.gather(
-                *(upload_file(file, self.proxy) for file in files)
-            )
-            file_data = [
-                [[url], parse_file_name(file)]
-                for url, file in zip(uploaded_urls, files)
-            ]
+            uploaded_urls = await asyncio.gather(*(upload_file(file, self.proxy) for file in files))
+            file_data = [[[url], parse_file_name(file)] for url, file in zip(uploaded_urls, files, strict=True)]
 
         try:
             await self._batch_execute(
@@ -491,11 +553,7 @@ class GeminiClient(GemMixin):
                 ]
             )
 
-            session_state = {
-                "last_texts": {},
-                "last_thoughts": {},
-                "last_progress_time": time.time(),
-            }
+            streaming_state = _StreamingState()
             output = None
             async for output in self._generate(
                 prompt=prompt,
@@ -503,7 +561,7 @@ class GeminiClient(GemMixin):
                 model=model,
                 gem=gem,
                 chat=chat,
-                session_state=session_state,
+                streaming_state=streaming_state,
                 **kwargs,
             ):
                 yield output
@@ -522,11 +580,11 @@ class GeminiClient(GemMixin):
     async def _generate(
         self,
         prompt: str,
-        req_file_data: list[Any] | None = None,
+        req_file_data: list[list] | None = None,
         model: Model | str | dict = Model.UNSPECIFIED,
         gem: Gem | str | None = None,
         chat: Optional["ChatSession"] = None,
-        session_state: dict[str, Any] | None = None,
+        streaming_state: _StreamingState | None = None,
         **kwargs,
     ) -> AsyncGenerator[ModelOutput, None]:
         """
@@ -540,10 +598,7 @@ class GeminiClient(GemMixin):
         elif isinstance(model, dict):
             model = Model.from_dict(model)
         elif not isinstance(model, Model):
-            raise TypeError(
-                f"'model' must be a `gemini_webapi.constants.Model` instance, "
-                f"string, or dictionary; got `{type(model).__name__}`"
-            )
+            raise TypeError(f"'model' must be a `gemini_webapi.constants.Model` instance, string, or dictionary; got `{type(model).__name__}`")
 
         _reqid = self._reqid
         self._reqid += 100000
@@ -569,11 +624,7 @@ class GeminiClient(GemMixin):
 
             inner_req_list: list[Any] = [None] * 69
             inner_req_list[0] = message_content
-            inner_req_list[2] = (
-                chat.metadata
-                if chat
-                else ["", "", "", None, None, None, None, None, None, ""]
-            )
+            inner_req_list[2] = chat.metadata if chat else ["", "", "", None, None, None, None, None, None, ""]
             inner_req_list[7] = 1  # Enable Snapshot Streaming
             if gem_id:
                 inner_req_list[19] = gem_id
@@ -598,9 +649,7 @@ class GeminiClient(GemMixin):
             ) as response:
                 if response.status_code != 200:
                     await self.close()
-                    raise APIError(
-                        f"Failed to generate contents. Status: {response.status_code}"
-                    )
+                    raise APIError(f"Failed to generate contents. Status: {response.status_code}")
 
                 if self.client:
                     self.cookies.update(self.client.cookies)
@@ -608,256 +657,14 @@ class GeminiClient(GemMixin):
                 buffer = ""
                 decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
-                # Track last seen content. session_state allows persistence across retries.
-                if session_state is None:
-                    session_state = {
-                        "last_texts": {},
-                        "last_thoughts": {},
-                        "last_progress_time": time.time(),
-                    }
+                # Track last seen content. streaming_state allows persistence across retries.
+                if streaming_state is None:
+                    streaming_state = _StreamingState()
 
-                last_texts: dict[str, str] = session_state["last_texts"]
-                last_thoughts: dict[str, str] = session_state["last_thoughts"]
-                last_progress_time = session_state.get(
-                    "last_progress_time", time.time()
-                )
-
-                is_thinking = False
-                is_queueing = False
-                has_candidates = False
-                is_completed = False
-                is_final_chunk = False
-
-                async def _process_parts(
-                    parts: list[Any],
-                ) -> AsyncGenerator[ModelOutput, None]:
-                    nonlocal is_thinking, is_queueing, has_candidates, is_completed, is_final_chunk
-                    for part in parts:
-                        # 1. Check for fatal error codes
-                        error_code = get_nested_value(part, [5, 2, 0, 1, 0])
-                        if error_code:
-                            await self.close()
-                            match error_code:
-                                case ErrorCode.USAGE_LIMIT_EXCEEDED:
-                                    raise UsageLimitExceeded(
-                                        f"Usage limit exceeded for model '{model.model_name}'. Please wait a few minutes, "
-                                        "switch to a different model (e.g., Gemini Flash), or check your account limits on gemini.google.com."
-                                    )
-                                case ErrorCode.MODEL_INCONSISTENT:
-                                    raise ModelInvalid(
-                                        "The specified model is inconsistent with the conversation history. "
-                                        "Please ensure you are using the same 'model' parameter throughout the entire ChatSession."
-                                    )
-                                case ErrorCode.MODEL_HEADER_INVALID:
-                                    raise ModelInvalid(
-                                        f"The model '{model.model_name}' is currently unavailable or the request structure is outdated. "
-                                        "Please update 'gemini_webapi' to the latest version or report this on GitHub if the problem persists."
-                                    )
-                                case ErrorCode.IP_TEMPORARILY_BLOCKED:
-                                    raise TemporarilyBlocked(
-                                        "Your IP address has been temporarily flagged or blocked by Google. "
-                                        "Please try using a proxy, a different network, or wait for a while before retrying."
-                                    )
-                                case ErrorCode.TEMPORARY_ERROR_1013:
-                                    raise APIError(
-                                        "Gemini encountered a temporary error (1013). Retrying..."
-                                    )
-                                case _:
-                                    raise APIError(
-                                        f"Failed to generate contents (stream). Unknown API error code: {error_code}. "
-                                        "This might be a temporary Google service issue."
-                                    )
-
-                        # 2. Detect if model is busy analyzing data (Thinking state)
-                        if "data_analysis_tool" in str(part):
-                            is_thinking = True
-                            if not has_candidates:
-                                logger.debug("Model is active (thinking/analyzing)...")
-
-                        # 3. Check for queueing status
-                        status = get_nested_value(part, [5])
-                        if isinstance(status, list) and status:
-                            is_queueing = True
-                            if not has_candidates:
-                                logger.debug(
-                                    "Model is in a waiting state (queueing)..."
-                                )
-
-                        inner_json_str = get_nested_value(part, [2])
-                        if inner_json_str:
-                            try:
-                                part_json = json.loads(inner_json_str)
-                                m_data = get_nested_value(part_json, [1])
-                                if m_data and isinstance(chat, ChatSession):
-                                    chat.metadata = m_data
-                                context_str = get_nested_value(part_json, [25])
-                                if isinstance(context_str, str):
-                                    is_completed = True
-                                    is_thinking = False
-                                    is_queueing = False
-                                    if isinstance(chat, ChatSession):
-                                        chat.metadata = [None] * 9 + [context_str]
-
-                                candidates_list = get_nested_value(part_json, [4], [])
-                                if candidates_list:
-                                    output_candidates = []
-                                    for i, candidate_data in enumerate(candidates_list):
-                                        rcid = get_nested_value(candidate_data, [0])
-                                        if not rcid:
-                                            continue
-                                        if isinstance(chat, ChatSession):
-                                            chat.rcid = rcid
-
-                                        # Text output and thoughts
-                                        text = get_nested_value(
-                                            candidate_data, [1, 0], ""
-                                        )
-                                        if re.match(
-                                            r"^http://googleusercontent\.com/card_content/\d+",
-                                            text,
-                                        ):
-                                            text = (
-                                                get_nested_value(
-                                                    candidate_data, [22, 0]
-                                                )
-                                                or text
-                                            )
-
-                                        # Cleanup googleusercontent artifacts
-                                        text = re.sub(
-                                            r"http://googleusercontent\.com/\w+/\d+\n*",
-                                            "",
-                                            text,
-                                        )
-
-                                        thoughts = (
-                                            get_nested_value(candidate_data, [37, 0, 0])
-                                            or ""
-                                        )
-                                        # Image handling
-                                        web_images = []
-                                        for web_img_data in get_nested_value(
-                                            candidate_data, [12, 1], []
-                                        ):
-                                            url = get_nested_value(
-                                                web_img_data, [0, 0, 0]
-                                            )
-                                            if url:
-                                                web_images.append(
-                                                    WebImage(
-                                                        url=url,
-                                                        title=get_nested_value(
-                                                            web_img_data, [7, 0], ""
-                                                        ),
-                                                        alt=get_nested_value(
-                                                            web_img_data, [0, 4], ""
-                                                        ),
-                                                        proxy=self.proxy,
-                                                    )
-                                                )
-
-                                        generated_images = []
-                                        for gen_img_data in get_nested_value(
-                                            candidate_data, [12, 7, 0], []
-                                        ):
-                                            url = get_nested_value(
-                                                gen_img_data, [0, 3, 3]
-                                            )
-                                            if url:
-                                                img_num = get_nested_value(
-                                                    gen_img_data, [3, 6]
-                                                )
-                                                generated_images.append(
-                                                    GeneratedImage(
-                                                        url=url,
-                                                        title=(
-                                                            f"[Generated Image {img_num}]"
-                                                            if img_num
-                                                            else "[Generated Image]"
-                                                        ),
-                                                        alt=get_nested_value(
-                                                            gen_img_data, [3, 5, 0], ""
-                                                        ),
-                                                        proxy=self.proxy,
-                                                        cookies=self.cookies,
-                                                    )
-                                                )
-
-                                        # Determine if this frame represents the final state of the message
-                                        is_final_chunk = (
-                                            isinstance(
-                                                get_nested_value(candidate_data, [2]),
-                                                list,
-                                            )
-                                            or get_nested_value(
-                                                candidate_data, [8, 0], 1
-                                            )
-                                            == 2
-                                        )
-
-                                        last_sent_text = last_texts.get(
-                                            rcid
-                                        ) or last_texts.get(f"idx_{i}", "")
-                                        text_delta, new_full_text = get_delta_by_fp_len(
-                                            text,
-                                            last_sent_text,
-                                            is_final=is_final_chunk,
-                                        )
-                                        last_sent_thought = last_thoughts.get(
-                                            rcid
-                                        ) or last_thoughts.get(f"idx_{i}", "")
-                                        if thoughts:
-                                            thoughts_delta, new_full_thought = (
-                                                get_delta_by_fp_len(
-                                                    thoughts,
-                                                    last_sent_thought,
-                                                    is_final=is_final_chunk,
-                                                )
-                                            )
-                                        else:
-                                            thoughts_delta = ""
-                                            new_full_thought = ""
-
-                                        if (
-                                            text_delta
-                                            or thoughts_delta
-                                            or web_images
-                                            or generated_images
-                                        ):
-                                            has_candidates = True
-
-                                        # Update state with the provider's cleaned state to handle drift
-                                        last_texts[rcid] = last_texts[f"idx_{i}"] = (
-                                            new_full_text
-                                        )
-
-                                        last_thoughts[rcid] = last_thoughts[
-                                            f"idx_{i}"
-                                        ] = new_full_thought
-
-                                        output_candidates.append(
-                                            Candidate(
-                                                rcid=rcid,
-                                                text=text,
-                                                text_delta=text_delta,
-                                                thoughts=thoughts or None,
-                                                thoughts_delta=thoughts_delta,
-                                                web_images=web_images,
-                                                generated_images=generated_images,
-                                            )
-                                        )
-
-                                    if output_candidates:
-                                        is_thinking = False
-                                        is_queueing = False
-                                        yield ModelOutput(
-                                            metadata=get_nested_value(
-                                                part_json, [1], []
-                                            ),
-                                            candidates=output_candidates,
-                                        )
-                            except json.JSONDecodeError:
-                                continue
+                last_texts = streaming_state.last_texts
+                last_thoughts = streaming_state.last_thoughts
+                last_progress_time = streaming_state.last_progress_time
+                flags = _StreamFlags()
 
                 async for chunk in response.aiter_bytes():
                     buffer += decoder.decode(chunk, final=False)
@@ -866,49 +673,189 @@ class GeminiClient(GemMixin):
                     parsed_parts, buffer = parse_response_by_frame(buffer)
 
                     got_update = False
-                    async for out in _process_parts(parsed_parts):
-                        yield out
-                        got_update = True
+                    for part in parsed_parts:
+                        result = await self._process_stream_part(part, model, chat, last_texts, last_thoughts, flags)
+                        if result:
+                            yield result
+                            got_update = True
 
-                    if got_update or is_thinking:
+                    if got_update or flags.is_thinking:
                         last_progress_time = time.time()
-                        session_state["last_progress_time"] = last_progress_time
-                    else:
-                        stall_threshold = min(self.timeout, self.watchdog_timeout)
-                        if (time.time() - last_progress_time) > stall_threshold:
-                            logger.warning(
-                                f"Response stalled (active connection but no progress for {stall_threshold}s). "
-                                f"Queueing={is_queueing}. Retrying..."
-                            )
-                            await self.close()
-                            raise APIError("Response stalled (zombie stream).")
+                        streaming_state.last_progress_time = last_progress_time
+                        continue
+
+                    stall_threshold = min(self.timeout, self.watchdog_timeout)
+                    if (time.time() - last_progress_time) > stall_threshold:
+                        logger.warning(f"Response stalled (active connection but no progress for {stall_threshold}s). Queueing={flags.is_queueing}. Retrying...")
+                        await self.close()
+                        raise APIError("Response stalled (zombie stream).")
 
                 # Final flush
                 buffer += decoder.decode(b"", final=True)
                 if buffer:
                     parsed_parts, _ = parse_response_by_frame(buffer)
-                    async for out in _process_parts(parsed_parts):
-                        yield out
+                    for part in parsed_parts:
+                        result = await self._process_stream_part(part, model, chat, last_texts, last_thoughts, flags)
+                        if result:
+                            yield result
 
-                if not (is_completed or is_final_chunk) or is_thinking or is_queueing:
+                if not (flags.is_completed or flags.is_final_chunk) or flags.is_thinking or flags.is_queueing:
                     logger.debug(
-                        f"Stream interrupted (completed={is_completed}, final_chunk={is_final_chunk}, thinking={is_thinking}, queueing={is_queueing}). "
-                        "Polling again..."
+                        f"Stream interrupted (completed={flags.is_completed}, final_chunk={flags.is_final_chunk}, thinking={flags.is_thinking}, queueing={flags.is_queueing}). Polling again..."
                     )
                     raise APIError("Stream interrupted or truncated.")
 
-        except ReadTimeout:
-            raise TimeoutError(
+        except ReadTimeout as exc:
+            raise RequestTimeoutError(
                 "The request timed out while waiting for Gemini to respond. This often happens with very long prompts "
                 "or complex file analysis. Try increasing the 'timeout' value when initializing GeminiClient."
-            )
+            ) from exc
         except (GeminiError, APIError):
             raise
         except Exception as e:
-            logger.debug(
-                f"{type(e).__name__}: {e}; Unexpected response or parsing error. Response: {locals().get('response', 'N/A')}"
-            )
-            raise APIError(f"Failed to parse response body: {e}")
+            logger.debug(f"{type(e).__name__}: {e}; Unexpected response or parsing error. Response: {locals().get('response', 'N/A')}")
+            raise APIError(f"Failed to parse response body: {e}") from e
+
+    async def _process_stream_part(
+        self,
+        part: list[Any],
+        model: Model,
+        chat: Optional["ChatSession"],
+        last_texts: dict[str, str],
+        last_thoughts: dict[str, str],
+        flags: _StreamFlags,
+    ) -> ModelOutput | None:
+        """Process a single stream part and return ModelOutput if candidates found."""
+        # Check for fatal error codes
+        error_code = get_nested_value(part, [5, 2, 0, 1, 0])
+        if error_code:
+            await self.close()
+            _raise_for_error_code(error_code, model.model_name)
+
+        # Detect thinking state
+        if "data_analysis_tool" in str(part):
+            flags.is_thinking = True
+            if not flags.has_candidates:
+                logger.debug("Model is active (thinking/analyzing)...")
+
+        # Check for queueing status
+        status = get_nested_value(part, [5])
+        if isinstance(status, list) and status:
+            flags.is_queueing = True
+            if not flags.has_candidates:
+                logger.debug("Model is in a waiting state (queueing)...")
+
+        inner_json_str = get_nested_value(part, [2])
+        if not inner_json_str:
+            return None
+
+        try:
+            part_json = json.loads(inner_json_str)
+        except json.JSONDecodeError:
+            return None
+
+        # Update chat metadata
+        m_data = get_nested_value(part_json, [1])
+        if m_data and isinstance(chat, ChatSession):
+            chat.metadata = m_data
+
+        # Check for completion
+        context_str = get_nested_value(part_json, [25])
+        if isinstance(context_str, str):
+            flags.is_completed = True
+            flags.is_thinking = False
+            flags.is_queueing = False
+            if isinstance(chat, ChatSession):
+                chat.metadata = [None] * 9 + [context_str]
+
+        # Process candidates
+        candidates_list = get_nested_value(part_json, [4], [])
+        if not candidates_list:
+            return None
+
+        output_candidates = self._parse_candidates(candidates_list, chat, last_texts, last_thoughts, flags)
+
+        if not output_candidates:
+            return None
+
+        flags.is_thinking = False
+        flags.is_queueing = False
+        return ModelOutput(
+            metadata=get_nested_value(part_json, [1], []),
+            candidates=output_candidates,
+        )
+
+    def _parse_candidates(
+        self,
+        candidates_list: list[Any],
+        chat: Optional["ChatSession"],
+        last_texts: dict[str, str],
+        last_thoughts: dict[str, str],
+        flags: _StreamFlags,
+    ) -> list[Candidate]:
+        """Parse candidate data into Candidate objects."""
+        output_candidates = []
+
+        for i, candidate_data in enumerate(candidates_list):
+            rcid = get_nested_value(candidate_data, [0])
+            if not rcid:
+                continue
+
+            if isinstance(chat, ChatSession):
+                chat.rcid = rcid
+
+            candidate = self._parse_single_candidate(candidate_data, i, rcid, last_texts, last_thoughts, flags)
+            if candidate:
+                output_candidates.append(candidate)
+
+        return output_candidates
+
+    def _parse_single_candidate(
+        self,
+        candidate_data: list[Any],
+        index: int,
+        rcid: str,
+        last_texts: dict[str, str],
+        last_thoughts: dict[str, str],
+        flags: _StreamFlags,
+    ) -> Candidate | None:
+        """Parse a single candidate from the response."""
+        text = _extract_candidate_text(candidate_data)
+        thoughts = get_nested_value(candidate_data, [37, 0, 0]) or ""
+
+        web_images = _parse_web_images(candidate_data, self.proxy)
+        generated_images = _parse_generated_images(candidate_data, self.proxy, self.cookies)
+
+        # Determine if this frame represents the final state
+        flags.is_final_chunk = isinstance(get_nested_value(candidate_data, [2]), list) or get_nested_value(candidate_data, [8, 0], 1) == 2
+
+        # Calculate deltas
+        last_sent_text = last_texts.get(rcid) or last_texts.get(f"idx_{index}", "")
+        text_delta, new_full_text = get_delta_by_fp_len(text, last_sent_text, is_final=flags.is_final_chunk)
+
+        last_sent_thought = last_thoughts.get(rcid) or last_thoughts.get(f"idx_{index}", "")
+        if thoughts:
+            thoughts_delta, new_full_thought = get_delta_by_fp_len(thoughts, last_sent_thought, is_final=flags.is_final_chunk)
+        else:
+            thoughts_delta = ""
+            new_full_thought = ""
+
+        if text_delta or thoughts_delta or web_images or generated_images:
+            flags.has_candidates = True
+
+        # Update state
+        last_texts[rcid] = last_texts[f"idx_{index}"] = new_full_text
+        last_thoughts[rcid] = last_thoughts[f"idx_{index}"] = new_full_thought
+
+        return Candidate(
+            rcid=rcid,
+            text=text,
+            text_delta=text_delta,
+            thoughts=thoughts or None,
+            thoughts_delta=thoughts_delta,
+            web_images=web_images,
+            generated_images=generated_images,
+        )
 
     def start_chat(self, **kwargs) -> "ChatSession":
         """
@@ -986,23 +933,19 @@ class GeminiClient(GemMixin):
                 params=params,
                 data={
                     "at": self.access_token,
-                    "f.req": json.dumps(
-                        [[payload.serialize() for payload in payloads]]
-                    ).decode("utf-8"),
+                    "f.req": json.dumps([[payload.serialize() for payload in payloads]]).decode("utf-8"),
                 },
                 **kwargs,
             )
-        except ReadTimeout:
-            raise TimeoutError(
+        except ReadTimeout as exc:
+            raise RequestTimeoutError(
                 "The request timed out while waiting for Gemini to respond. This often happens with very long prompts "
                 "or complex file analysis. Try increasing the 'timeout' value when initializing GeminiClient."
-            )
+            ) from exc
 
         if response.status_code != 200:
             await self.close()
-            raise APIError(
-                f"Batch execution failed with status code {response.status_code}"
-            )
+            raise APIError(f"Batch execution failed with status code {response.status_code}")
 
         if self.client:
             self.cookies.update(self.client.cookies)
@@ -1037,10 +980,10 @@ class ChatSession:
 
     __slots__ = [
         "__metadata",
+        "gem",
         "geminiclient",
         "last_output",
         "model",
-        "gem",
     ]
 
     def __init__(
@@ -1200,9 +1143,7 @@ class ChatSession:
             raise ValueError("No previous output data found in this chat session.")
 
         if index >= len(self.last_output.candidates):
-            raise ValueError(
-                f"Index {index} exceeds the number of candidates in last model output."
-            )
+            raise ValueError(f"Index {index} exceeds the number of candidates in last model output.")
 
         self.last_output.chosen = index
         self.rcid = self.last_output.rcid

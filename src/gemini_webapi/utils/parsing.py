@@ -7,7 +7,6 @@ import orjson as json
 
 from .logger import logger
 
-
 _LENGTH_MARKER_PATTERN = re.compile(r"(\d+)\n")
 _VOLATILE_SYMBOLS = string.whitespace + string.punctuation
 _VOLATILE_SET = frozenset(_VOLATILE_SYMBOLS)
@@ -38,9 +37,7 @@ def get_fp_len(s: str) -> int:
     return len(s.translate(_VOLATILE_TRANS_TABLE))
 
 
-def get_delta_by_fp_len(
-    new_raw: str, last_sent_clean: str, is_final: bool
-) -> tuple[str, str]:
+def get_delta_by_fp_len(new_raw: str, last_sent_clean: str, is_final: bool) -> tuple[str, str]:
     """
     Calculate text delta by aligning stable content and matching volatile symbols.
     Handles temporary flicker at ends and permanent escaping drift during code block transitions.
@@ -63,7 +60,7 @@ def get_delta_by_fp_len(
                 break
         else:
             common_len = 0
-            for c1, c2 in zip(last_sent_clean, new_c):
+            for c1, c2 in zip(last_sent_clean, new_c, strict=False):
                 if c1 == c2:
                     common_len += 1
                 else:
@@ -90,11 +87,7 @@ def get_delta_by_fp_len(
         if char_s == char_n:
             i += 1
             j += 1
-        elif (
-            char_n == "\\"
-            and (p_low + j + 1) < limit_n
-            and new_c[p_low + j + 1] == char_s
-        ):
+        elif char_n == "\\" and (p_low + j + 1) < limit_n and new_c[p_low + j + 1] == char_s:
             j += 2
             i += 1
         elif char_s == "\\" and (i + 1) < limit_s and suffix[i + 1] == char_n:
@@ -106,9 +99,7 @@ def get_delta_by_fp_len(
     return new_c[p_low + j :], new_c
 
 
-def _get_char_count_for_utf16_units(
-    s: str, start_idx: int, utf16_units: int
-) -> tuple[int, int]:
+def _get_char_count_for_utf16_units(s: str, start_idx: int, utf16_units: int) -> tuple[int, int]:
     """
     Calculate the number of Python characters (code points) and actual UTF-16
     units found.
@@ -129,9 +120,7 @@ def _get_char_count_for_utf16_units(
     return count, units
 
 
-def get_nested_value(
-    data: Any, path: list[int | str], default: Any = None, verbose: bool = False
-) -> Any:
+def get_nested_value(data: Any, path: list[int | str], default: Any = None, verbose: bool = False) -> Any:
     """
     Safely navigate through a nested structure (list or dict) using a sequence of keys/indices.
 
@@ -151,21 +140,13 @@ def get_nested_value(
 
     for i, key in enumerate(path):
         found = False
-        if isinstance(key, int):
-            if isinstance(current, list) and -len(current) <= key < len(current):
-                current = current[key]
-                found = True
-        elif isinstance(key, str):
-            if isinstance(current, dict) and key in current:
-                current = current[key]
-                found = True
+        if (isinstance(key, int) and isinstance(current, list) and -len(current) <= key < len(current)) or (isinstance(key, str) and isinstance(current, dict) and key in current):
+            current = current[key]
+            found = True
 
         if not found:
             if verbose:
-                logger.debug(
-                    f"Safe navigation: path {path} ended at index {i} (key '{key}'), "
-                    f"returning default. Context: {reprlib.repr(current)}"
-                )
+                logger.debug(f"Safe navigation: path {path} ended at index {i} (key '{key}'), returning default. Context: {reprlib.repr(current)}")
             return default
 
     return current if current is not None else default
@@ -217,16 +198,11 @@ def parse_response_by_frame(content: str) -> tuple[list[Any], str]:
         # Content starts immediately after the digits.
         # Google uses UTF-16 code units (JavaScript `String.length`) for the length marker.
         start_content = match.start() + len(length_val)
-        char_count, units_found = _get_char_count_for_utf16_units(
-            content, start_content, length
-        )
+        char_count, units_found = _get_char_count_for_utf16_units(content, start_content, length)
 
         if units_found < length:
             # Incomplete frame — don't advance pos so remainder includes it
-            logger.debug(
-                f"Incomplete frame at pos {consumed_pos}: expected {length} UTF-16 units, "
-                f"got {units_found}"
-            )
+            logger.debug(f"Incomplete frame at pos {consumed_pos}: expected {length} UTF-16 units, got {units_found}")
             break
 
         end_pos = start_content + char_count
@@ -243,10 +219,7 @@ def parse_response_by_frame(content: str) -> tuple[list[Any], str]:
             else:
                 parsed_frames.append(parsed)
         except json.JSONDecodeError:
-            logger.debug(
-                f"Failed to parse chunk at pos {start_content} with length {length}. "
-                f"Frame content: {reprlib.repr(chunk)}"
-            )
+            logger.debug(f"Failed to parse chunk at pos {start_content} with length {length}. Frame content: {reprlib.repr(chunk)}")
 
     return parsed_frames, content[consumed_pos:]
 
@@ -257,9 +230,7 @@ def extract_json_from_response(text: str) -> list:
     """
 
     if not isinstance(text, str):
-        raise TypeError(
-            f"Input text is expected to be a string, got {type(text).__name__} instead."
-        )
+        raise TypeError(f"Input text is expected to be a string, got {type(text).__name__} instead.")
 
     content = text
     if content.startswith(")]}'"):

@@ -1,6 +1,6 @@
+import asyncio
 import os
 import re
-import asyncio
 from asyncio import Task
 from pathlib import Path
 
@@ -12,13 +12,8 @@ from .load_browser_cookies import load_browser_cookies
 from .logger import logger
 
 
-async def send_request(
-    cookies: dict | Cookies, proxy: str | None = None
-) -> tuple[Response | None, Cookies]:
-    """
-    Send http request with provided cookies.
-    """
-
+async def send_request(cookies: dict | Cookies, proxy: str | None = None) -> tuple[Response | None, Cookies]:
+    """Send http request with provided cookies."""
     async with AsyncClient(
         http2=True,
         proxy=proxy,
@@ -31,12 +26,189 @@ async def send_request(
         return response, client.cookies
 
 
+def _get_secure_1psid(cookies: dict | Cookies) -> str | None:
+    """Safely extract __Secure-1PSID from cookies, preferring .google.com domain."""
+    if isinstance(cookies, Cookies):
+        return cookies.get("__Secure-1PSID", domain=".google.com") or cookies.get("__Secure-1PSID")
+    return cookies.get("__Secure-1PSID")
+
+
+def _get_cache_dir() -> Path:
+    """Get the cache directory for cookie storage."""
+    gemini_cookie_path = os.getenv("GEMINI_COOKIE_PATH")
+    if gemini_cookie_path:
+        return Path(gemini_cookie_path)
+    return Path(__file__).parent / "temp"
+
+
+def _create_cookie_jar_with_base(extra_cookies: Cookies, base_cookies: dict | Cookies) -> Cookies:
+    """Create a new cookie jar merging extra and base cookies."""
+    jar = Cookies(extra_cookies)
+    jar.update(base_cookies)
+    return jar
+
+
+def _add_base_cookie_task(
+    tasks: list[Task],
+    base_cookies: dict | Cookies,
+    extra_cookies: Cookies,
+    proxy: str | None,
+    verbose: bool,
+) -> None:
+    """Add task for base cookies if both required cookies are present."""
+    has_psid = "__Secure-1PSID" in base_cookies
+    has_psidts = "__Secure-1PSIDTS" in base_cookies
+
+    if has_psid and has_psidts:
+        jar = _create_cookie_jar_with_base(extra_cookies, base_cookies)
+        tasks.append(Task(send_request(jar, proxy=proxy)))
+    elif verbose:
+        logger.debug("Skipping loading base cookies. Either __Secure-1PSID or __Secure-1PSIDTS is not provided.")
+
+
+def _add_cached_cookie_tasks(
+    tasks: list[Task],
+    base_cookies: dict | Cookies,
+    extra_cookies: Cookies,
+    cache_dir: Path,
+    secure_1psid: str | None,
+    proxy: str | None,
+    verbose: bool,
+) -> None:
+    """Add tasks for cached cookie files."""
+    if secure_1psid:
+        _add_single_cached_cookie_task(tasks, base_cookies, extra_cookies, cache_dir, secure_1psid, proxy, verbose)
+    else:
+        _add_all_cached_cookie_tasks(tasks, extra_cookies, cache_dir, proxy, verbose)
+
+
+def _add_single_cached_cookie_task(
+    tasks: list[Task],
+    base_cookies: dict | Cookies,
+    extra_cookies: Cookies,
+    cache_dir: Path,
+    secure_1psid: str,
+    proxy: str | None,
+    verbose: bool,
+) -> None:
+    """Add task for a specific cached cookie file matching the provided PSID."""
+    cache_file = cache_dir / f".cached_1psidts_{secure_1psid}.txt"
+
+    if not cache_file.is_file():
+        if verbose:
+            logger.debug("Skipping loading cached cookies. Cache file not found.")
+        return
+
+    cached_1psidts = cache_file.read_text()
+    if not cached_1psidts:
+        if verbose:
+            logger.debug("Skipping loading cached cookies. Cache file is empty.")
+        return
+
+    jar = _create_cookie_jar_with_base(extra_cookies, base_cookies)
+    jar.set("__Secure-1PSIDTS", cached_1psidts, domain=".google.com")
+    tasks.append(Task(send_request(jar, proxy=proxy)))
+
+
+def _add_all_cached_cookie_tasks(
+    tasks: list[Task],
+    extra_cookies: Cookies,
+    cache_dir: Path,
+    proxy: str | None,
+    verbose: bool,
+) -> None:
+    """Add tasks for all valid cached cookie files."""
+    valid_caches = 0
+
+    for cache_file in cache_dir.glob(".cached_1psidts_*.txt"):
+        cached_1psidts = cache_file.read_text()
+        if not cached_1psidts:
+            continue
+
+        jar = Cookies(extra_cookies)
+        psid = cache_file.stem[16:]  # Extract PSID from filename
+        jar.set("__Secure-1PSID", psid, domain=".google.com")
+        jar.set("__Secure-1PSIDTS", cached_1psidts, domain=".google.com")
+        tasks.append(Task(send_request(jar, proxy=proxy)))
+        valid_caches += 1
+
+    if valid_caches == 0 and verbose:
+        logger.debug("Skipping loading cached cookies. Cookies will be cached after successful initialization.")
+
+
+def _add_browser_cookie_tasks(
+    tasks: list[Task],
+    base_cookies: dict | Cookies,
+    proxy: str | None,
+    verbose: bool,
+) -> None:
+    """Add tasks for browser cookies if browser-cookie3 is available."""
+    try:
+        browser_cookies = load_browser_cookies(domain_name="google.com", verbose=verbose)
+    except ImportError:
+        if verbose:
+            logger.debug("Skipping loading local browser cookies. Optional dependency 'browser-cookie3' is not installed.")
+        return
+    except Exception as e:
+        if verbose:
+            logger.warning(f"Skipping loading local browser cookies. {e}")
+        return
+
+    if not browser_cookies:
+        if verbose:
+            logger.debug("Skipping loading local browser cookies. Login to gemini.google.com in your browser first.")
+        return
+
+    valid_browser_cookies = 0
+    for browser, cookies in browser_cookies.items():
+        secure_1psid = cookies.get("__Secure-1PSID")
+        if not secure_1psid:
+            continue
+
+        # Skip if PSID doesn't match provided base cookies
+        if "__Secure-1PSID" in base_cookies and base_cookies["__Secure-1PSID"] != secure_1psid:
+            if verbose:
+                logger.debug(f"Skipping loading local browser cookies from {browser}. __Secure-1PSID does not match the one provided.")
+            continue
+
+        local_cookies: dict[str, str] = {"__Secure-1PSID": secure_1psid}
+        if secure_1psidts := cookies.get("__Secure-1PSIDTS"):
+            local_cookies["__Secure-1PSIDTS"] = secure_1psidts
+        if nid := cookies.get("NID"):
+            local_cookies["NID"] = nid
+
+        tasks.append(Task(send_request(local_cookies, proxy=proxy)))
+        valid_browser_cookies += 1
+
+        if verbose:
+            logger.debug(f"Loaded local browser cookies from {browser}")
+
+    if valid_browser_cookies == 0 and verbose:
+        logger.debug("Skipping loading local browser cookies. Login to gemini.google.com in your browser first.")
+
+
+def _extract_tokens_from_response(response_text: str) -> tuple[str | None, str | None, str | None]:
+    """Extract SNlM0e, cfb2h, and FdrFJe tokens from response HTML."""
+    snlm0e_match = re.search(r'"SNlM0e":\s*"(.*?)"', response_text)
+    if not snlm0e_match:
+        return None, None, None
+
+    cfb2h_match = re.search(r'"cfb2h":\s*"(.*?)"', response_text)
+    fdrfje_match = re.search(r'"FdrFJe":\s*"(.*?)"', response_text)
+
+    return (
+        snlm0e_match.group(1),
+        cfb2h_match.group(1) if cfb2h_match else None,
+        fdrfje_match.group(1) if fdrfje_match else None,
+    )
+
+
 async def get_access_token(
     base_cookies: dict | Cookies,
     proxy: str | None = None,
     verbose: bool = False,
     verify: bool = True,
-) -> tuple[str, Cookies, str | None, str | None]:
+) -> tuple[str, str | None, str | None, Cookies]:
     """
     Send a get request to gemini.google.com for each group of available cookies and return
     the value of "SNlM0e" as access token on the first successful request.
@@ -53,7 +225,7 @@ async def get_access_token(
     proxy: `str`, optional
         Proxy URL.
     verbose: `bool`, optional
-        If `True`, will print more infomation in logs.
+        If `True`, will print more information in logs.
     verify: `bool`, optional
         Whether to verify SSL certificates.
 
@@ -67,152 +239,38 @@ async def get_access_token(
     `gemini_webapi.AuthError`
         If all requests failed.
     """
-
-    async with AsyncClient(
-        http2=True, proxy=proxy, follow_redirects=True, verify=verify
-    ) as client:
+    # Fetch initial cookies from google.com
+    async with AsyncClient(http2=True, proxy=proxy, follow_redirects=True, verify=verify) as client:
         response = await client.get(Endpoint.GOOGLE)
 
-    extra_cookies = Cookies()
-    if response.status_code == 200:
-        extra_cookies = response.cookies
+    extra_cookies = response.cookies if response.status_code == 200 else Cookies()
+    cache_dir = _get_cache_dir()
+    secure_1psid = _get_secure_1psid(base_cookies)
 
-    tasks = []
-
-    # Base cookies passed directly on initializing client
-    # We use a Jar to merge extra_cookies and base_cookies safely (preserving domains)
-    if "__Secure-1PSID" in base_cookies and "__Secure-1PSIDTS" in base_cookies:
-        jar = Cookies(extra_cookies)
-        jar.update(base_cookies)
-        tasks.append(Task(send_request(jar, proxy=proxy)))
-    elif verbose:
-        logger.debug(
-            "Skipping loading base cookies. Either __Secure-1PSID or __Secure-1PSIDTS is not provided."
-        )
-
-    # Cached cookies in local file
-    cache_dir = (
-        (GEMINI_COOKIE_PATH := os.getenv("GEMINI_COOKIE_PATH"))
-        and Path(GEMINI_COOKIE_PATH)
-        or (Path(__file__).parent / "temp")
-    )
-
-    # Safely get __Secure-1PSID value
-    if isinstance(base_cookies, Cookies):
-        secure_1psid = base_cookies.get(
-            "__Secure-1PSID", domain=".google.com"
-        ) or base_cookies.get("__Secure-1PSID")
-    else:
-        secure_1psid = base_cookies.get("__Secure-1PSID")
-
-    if secure_1psid:
-        filename = f".cached_1psidts_{secure_1psid}.txt"
-        cache_file = cache_dir / filename
-        if cache_file.is_file():
-            cached_1psidts = cache_file.read_text()
-            if cached_1psidts:
-                jar = Cookies(extra_cookies)
-                jar.update(base_cookies)
-                jar.set("__Secure-1PSIDTS", cached_1psidts, domain=".google.com")
-                tasks.append(Task(send_request(jar, proxy=proxy)))
-            elif verbose:
-                logger.debug("Skipping loading cached cookies. Cache file is empty.")
-        elif verbose:
-            logger.debug("Skipping loading cached cookies. Cache file not found.")
-    else:
-        valid_caches = 0
-        cache_files = cache_dir.glob(".cached_1psidts_*.txt")
-        for cache_file in cache_files:
-            cached_1psidts = cache_file.read_text()
-            if cached_1psidts:
-                jar = Cookies(extra_cookies)
-                psid = cache_file.stem[16:]
-                jar.set("__Secure-1PSID", psid, domain=".google.com")
-                jar.set("__Secure-1PSIDTS", cached_1psidts, domain=".google.com")
-                tasks.append(Task(send_request(jar, proxy=proxy)))
-                valid_caches += 1
-
-        if valid_caches == 0 and verbose:
-            logger.debug(
-                "Skipping loading cached cookies. Cookies will be cached after successful initialization."
-            )
-
-    # Browser cookies (if browser-cookie3 is installed)
-    try:
-        valid_browser_cookies = 0
-        browser_cookies = load_browser_cookies(
-            domain_name="google.com", verbose=verbose
-        )
-        if browser_cookies:
-            for browser, cookies in browser_cookies.items():
-                if secure_1psid := cookies.get("__Secure-1PSID"):
-                    if (
-                        "__Secure-1PSID" in base_cookies
-                        and base_cookies["__Secure-1PSID"] != secure_1psid
-                    ):
-                        if verbose:
-                            logger.debug(
-                                f"Skipping loading local browser cookies from {browser}. "
-                                f"__Secure-1PSID does not match the one provided."
-                            )
-                        continue
-
-                    local_cookies = {"__Secure-1PSID": secure_1psid}
-                    if secure_1psidts := cookies.get("__Secure-1PSIDTS"):
-                        local_cookies["__Secure-1PSIDTS"] = secure_1psidts
-                    if nid := cookies.get("NID"):
-                        local_cookies["NID"] = nid
-                    tasks.append(Task(send_request(local_cookies, proxy=proxy)))
-                    valid_browser_cookies += 1
-                    if verbose:
-                        logger.debug(f"Loaded local browser cookies from {browser}")
-
-        if valid_browser_cookies == 0 and verbose:
-            logger.debug(
-                "Skipping loading local browser cookies. Login to gemini.google.com in your browser first."
-            )
-    except ImportError:
-        if verbose:
-            logger.debug(
-                "Skipping loading local browser cookies. Optional dependency 'browser-cookie3' is not installed."
-            )
-    except Exception as e:
-        if verbose:
-            logger.warning(f"Skipping loading local browser cookies. {e}")
+    # Collect authentication tasks from various sources
+    tasks: list[Task] = []
+    _add_base_cookie_task(tasks, base_cookies, extra_cookies, proxy, verbose)
+    _add_cached_cookie_tasks(tasks, base_cookies, extra_cookies, cache_dir, secure_1psid, proxy, verbose)
+    _add_browser_cookie_tasks(tasks, base_cookies, proxy, verbose)
 
     if not tasks:
-        raise AuthError(
-            "No valid cookies available for initialization. Please pass __Secure-1PSID and __Secure-1PSIDTS manually."
-        )
+        raise AuthError("No valid cookies available for initialization. Please pass __Secure-1PSID and __Secure-1PSIDTS manually.")
 
+    # Try each authentication method until one succeeds
     for i, future in enumerate(asyncio.as_completed(tasks)):
         try:
             response, request_cookies = await future
-            snlm0e = re.search(r'"SNlM0e":\s*"(.*?)"', response.text)
+            snlm0e, cfb2h, fdrfje = _extract_tokens_from_response(response.text)
+
             if snlm0e:
-                cfb2h = re.search(r'"cfb2h":\s*"(.*?)"', response.text)
-                fdrfje = re.search(r'"FdrFJe":\s*"(.*?)"', response.text)
                 if verbose:
-                    logger.debug(
-                        f"Init attempt ({i + 1}/{len(tasks)}) succeeded. Initializing client..."
-                    )
-                return (
-                    snlm0e.group(1),
-                    cfb2h.group(1) if cfb2h else None,
-                    fdrfje.group(1) if fdrfje else None,
-                    request_cookies,
-                )
-            elif verbose:
-                logger.debug(
-                    f"Init attempt ({i + 1}/{len(tasks)}) failed. Cookies invalid."
-                )
+                    logger.debug(f"Init attempt ({i + 1}/{len(tasks)}) succeeded. Initializing client...")
+                return snlm0e, cfb2h, fdrfje, request_cookies
+
+            if verbose:
+                logger.debug(f"Init attempt ({i + 1}/{len(tasks)}) failed. Cookies invalid.")
         except Exception as e:
             if verbose:
-                logger.debug(
-                    f"Init attempt ({i + 1}/{len(tasks)}) failed with error: {e}"
-                )
+                logger.debug(f"Init attempt ({i + 1}/{len(tasks)}) failed with error: {e}")
 
-    raise AuthError(
-        "Failed to initialize client. SECURE_1PSIDTS could get expired frequently, please make sure cookie values are up to date. "
-        f"(Failed initialization attempts: {len(tasks)})"
-    )
+    raise AuthError(f"Failed to initialize client. SECURE_1PSIDTS could get expired frequently, please make sure cookie values are up to date. (Failed initialization attempts: {len(tasks)})")

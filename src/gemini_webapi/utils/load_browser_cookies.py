@@ -40,20 +40,14 @@ def load_browser_cookies(domain_name: str = "", verbose=True) -> dict:
         try:
             jar: CookieJar = cookie_fn(domain_name=domain_name)
             if jar:
-                cookies[cookie_fn.__name__] = {
-                    cookie.name: cookie.value for cookie in jar
-                }
+                cookies[cookie_fn.__name__] = {cookie.name: cookie.value for cookie in jar}
         except bc3.BrowserCookieError:
             pass
         except PermissionError as e:
             if verbose:
-                logger.warning(
-                    f"Permission denied while trying to load cookies from {cookie_fn.__name__}. {e}"
-                )
+                logger.warning(f"Permission denied while trying to load cookies from {cookie_fn.__name__}. {e}")
         except Exception as e:
             if verbose:
-                logger.error(
-                    f"Error happened while trying to load cookies from {cookie_fn.__name__}. {e}"
-                )
+                logger.error(f"Error happened while trying to load cookies from {cookie_fn.__name__}. {e}")
 
     return cookies

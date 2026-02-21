@@ -35,15 +35,11 @@ class GemMixin:
         """
 
         if self._gems is None:
-            raise RuntimeError(
-                "Gems not fetched yet. Call `GeminiClient.fetch_gems()` method to fetch gems from gemini.google.com."
-            )
+            raise RuntimeError("Gems not fetched yet. Call `GeminiClient.fetch_gems()` method to fetch gems from gemini.google.com.")
 
         return self._gems
 
-    async def fetch_gems(
-        self, include_hidden: bool = False, language: str = "en", **kwargs
-    ) -> GemJar:
+    async def fetch_gems(self, include_hidden: bool = False, language: str = "en", **kwargs) -> GemJar:
         """
         Get a list of available gems from gemini, including system predefined gems and user-created custom gems.
 
@@ -68,11 +64,7 @@ class GemMixin:
             [
                 RPCData(
                     rpcid=GRPC.LIST_GEMS,
-                    payload=(
-                        f"[4,['{language}'],0]"
-                        if include_hidden
-                        else f"[3,['{language}'],0]"
-                    ),
+                    payload=(f"[4,['{language}'],0]" if include_hidden else f"[3,['{language}'],0]"),
                     identifier="system",
                 ),
                 RPCData(
@@ -105,13 +97,11 @@ class GemMixin:
                     continue
 
             if not predefined_gems and not custom_gems:
-                raise Exception
-        except Exception:
+                raise ValueError("No gems found in response")
+        except Exception as exc:
             await self.close()
             logger.debug(f"Unexpected response data structure: {response.text}")
-            raise APIError(
-                "Failed to fetch gems. Unexpected response data structure. Client will try to re-initialize on next request."
-            )
+            raise APIError("Failed to fetch gems. Unexpected response data structure. Client will try to re-initialize on next request.") from exc
 
         self._gems = GemJar(
             itertools.chain(
@@ -122,7 +112,7 @@ class GemMixin:
                             id=gem[0],
                             name=gem[1][0],
                             description=gem[1][1],
-                            prompt=gem[2] and gem[2][0] or None,
+                            prompt=(gem[2] and gem[2][0]) or None,
                             predefined=True,
                         ),
                     )
@@ -135,7 +125,7 @@ class GemMixin:
                             id=gem[0],
                             name=gem[1][0],
                             description=gem[1][1],
-                            prompt=gem[2] and gem[2][0] or None,
+                            prompt=(gem[2] and gem[2][0]) or None,
                             predefined=False,
                         ),
                     )
@@ -203,25 +193,13 @@ class GemMixin:
             part_body = json.loads(part_body_str)
             gem_id = get_nested_value(part_body, [0], verbose=True)
             if not gem_id:
-                raise Exception
-        except Exception:
+                raise ValueError("No gem ID found in response")
+        except Exception as exc:
             await self.close()
             logger.debug(f"Unexpected response data structure: {response.text}")
-            raise APIError(
-                "Failed to create gem. Unexpected response data structure. Client will try to re-initialize on next request."
-            )
+            raise APIError("Failed to create gem. Unexpected response data structure. Client will try to re-initialize on next request.") from exc
 
-        return Gem(
-            id=gem_id,
-            name=name,
-            description=description,
-            prompt=prompt,
-            predefined=False,
-        )
-
-    async def update_gem(
-        self, gem: Gem | str, name: str, prompt: str, description: str = ""
-    ) -> Gem:
+    async def update_gem(self, gem: Gem | str, name: str, prompt: str, description: str = "") -> Gem:
         """
         Update an existing custom gem.
 
@@ -242,10 +220,7 @@ class GemMixin:
             The updated gem.
         """
 
-        if isinstance(gem, Gem):
-            gem_id = gem.id
-        else:
-            gem_id = gem
+        gem_id = gem.id if isinstance(gem, Gem) else gem
 
         await self._batch_execute(
             [
@@ -295,17 +270,9 @@ class GemMixin:
         gem: `Gem | str`
             Gem to delete, can be either a `gemini_webapi.types.Gem` object or a gem id string.
         """
-
-        if isinstance(gem, Gem):
-            gem_id = gem.id
-        else:
-            gem_id = gem
+        gem_id = gem.id if isinstance(gem, Gem) else gem
 
         await self._batch_execute(
-            [
-                RPCData(
-                    rpcid=GRPC.DELETE_GEM, payload=json.dumps([gem_id]).decode("utf-8")
-                )
-            ],
+            [RPCData(rpcid=GRPC.DELETE_GEM, payload=json.dumps([gem_id]).decode("utf-8"))],
             **kwargs,
         )

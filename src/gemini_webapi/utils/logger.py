@@ -1,4 +1,5 @@
 import sys
+
 from loguru import logger as _logger
 
 _handler_id = None

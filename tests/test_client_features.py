@@ -1,11 +1,11 @@
+import logging
 import os
 import unittest
-import logging
 from pathlib import Path
 
-from gemini_webapi import GeminiClient, Gem, set_log_level, logger
+from gemini_webapi import Gem, GeminiClient, logger, set_log_level
 from gemini_webapi.constants import Model
-from gemini_webapi.exceptions import AuthError, UsageLimitExceeded, ModelInvalid
+from gemini_webapi.exceptions import AuthError, ModelInvalid, UsageLimitExceeded
 
 logging.getLogger("asyncio").setLevel(logging.ERROR)
 set_log_level("DEBUG")
@@ -13,9 +13,7 @@ set_log_level("DEBUG")
 
 class TestGeminiClient(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.geminiclient = GeminiClient(
-            os.getenv("SECURE_1PSID"), os.getenv("SECURE_1PSIDTS"), verify=False
-        )
+        self.geminiclient = GeminiClient(os.getenv("SECURE_1PSID"), os.getenv("SECURE_1PSIDTS"), verify=False)
 
         try:
             await self.geminiclient.init(auto_refresh=False)
@@ -35,9 +33,7 @@ class TestGeminiClient(unittest.IsolatedAsyncioTestCase):
         full_text = ""
         chunk_count = 0
 
-        async for chunk in self.geminiclient.generate_content_stream(
-            "What's the difference between 'await' and 'async for'?"
-        ):
+        async for chunk in self.geminiclient.generate_content_stream("What's the difference between 'await' and 'async for'?"):
             full_text += chunk.text_delta
             chunk_count += 1
             print(chunk.text_delta, end="", flush=True)
@@ -81,9 +77,7 @@ class TestGeminiClient(unittest.IsolatedAsyncioTestCase):
 
     @logger.catch(reraise=True)
     async def test_send_web_image(self):
-        response = await self.geminiclient.generate_content(
-            "Send me some pictures of cats"
-        )
+        response = await self.geminiclient.generate_content("Send me some pictures of cats")
         self.assertTrue(response.images)
         logger.debug(response.text)
         for image in response.images:
@@ -91,9 +85,7 @@ class TestGeminiClient(unittest.IsolatedAsyncioTestCase):
 
     @logger.catch(reraise=True)
     async def test_image_generation(self):
-        response = await self.geminiclient.generate_content(
-            "Generate some pictures of cats"
-        )
+        response = await self.geminiclient.generate_content("Generate some pictures of cats")
         self.assertTrue(response.images)
         logger.debug(response.text)
         for image in response.images:
@@ -147,9 +139,7 @@ class TestGeminiClient(unittest.IsolatedAsyncioTestCase):
             files=["assets/banner.png", "assets/favicon.png"],
         )
         logger.debug(response1.text)
-        response2 = await chat.send_message(
-            "Use image generation tool to modify the banner with another font and design."
-        )
+        response2 = await chat.send_message("Use image generation tool to modify the banner with another font and design.")
         logger.debug(response2.text)
         logger.debug(response2.images)
 
@@ -168,16 +158,12 @@ class TestGeminiClient(unittest.IsolatedAsyncioTestCase):
 
     @logger.catch(reraise=True)
     async def test_extension_google_workspace(self):
-        response = await self.geminiclient.generate_content(
-            "@Gmail What's the latest message in my mailbox?"
-        )
+        response = await self.geminiclient.generate_content("@Gmail What's the latest message in my mailbox?")
         logger.debug(response)
 
     @logger.catch(reraise=True)
     async def test_extension_youtube(self):
-        response = await self.geminiclient.generate_content(
-            "@Youtube What's the latest activity of Taylor Swift?"
-        )
+        response = await self.geminiclient.generate_content("@Youtube What's the latest activity of Taylor Swift?")
         logger.debug(response)
 
     @logger.catch(reraise=True)

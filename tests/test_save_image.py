@@ -1,10 +1,10 @@
+import logging
 import os
 import unittest
-import logging
 
 from httpx import HTTPError
 
-from gemini_webapi import GeminiClient, AuthError, set_log_level, logger
+from gemini_webapi import AuthError, GeminiClient, logger, set_log_level
 
 logging.getLogger("asyncio").setLevel(logging.ERROR)
 set_log_level("DEBUG")
@@ -12,9 +12,7 @@ set_log_level("DEBUG")
 
 class TestGeminiClient(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.geminiclient = GeminiClient(
-            os.getenv("SECURE_1PSID"), os.getenv("SECURE_1PSIDTS")
-        )
+        self.geminiclient = GeminiClient(os.getenv("SECURE_1PSID"), os.getenv("SECURE_1PSIDTS"))
 
         try:
             await self.geminiclient.init(auto_refresh=False)
@@ -22,9 +20,7 @@ class TestGeminiClient(unittest.IsolatedAsyncioTestCase):
             self.skipTest("Test was skipped due to invalid cookies")
 
     async def test_save_web_image(self):
-        response = await self.geminiclient.generate_content(
-            "Show me some pictures of random subjects"
-        )
+        response = await self.geminiclient.generate_content("Show me some pictures of random subjects")
         self.assertTrue(response.images)
         for image in response.images:
             try:
@@ -33,9 +29,7 @@ class TestGeminiClient(unittest.IsolatedAsyncioTestCase):
                 logger.warning(e)
 
     async def test_save_generated_image(self):
-        response = await self.geminiclient.generate_content(
-            "Generate a picture of random subjects"
-        )
+        response = await self.geminiclient.generate_content("Generate a picture of random subjects")
         self.assertTrue(response.images)
         for image in response.images:
             await image.save(verbose=True, full_size=True)
