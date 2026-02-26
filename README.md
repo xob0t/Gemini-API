@@ -78,17 +78,7 @@ Install/update the package with pip.
 pip install -U gemini_webapi
 ```
 
-Optionally, package offers a way to automatically import cookies from your local browser. To enable this feature, install `browser-cookie3` as well. Supported platforms and browsers can be found [here](https://github.com/borisbabic/browser_cookie3?tab=readme-ov-file#contribute).
-
-```sh
-pip install -U browser-cookie3
-```
-
 ## Authentication
-
-> [!TIP]
->
-> If `browser-cookie3` is installed, you can skip this step and go directly to [usage](#usage) section. Just make sure you have logged in to <https://gemini.google.com> in your browser.
 
 - Go to <https://gemini.google.com> and login with your Google account
 - Press F12 for web inspector, go to `Network` tab and refresh the page
@@ -111,7 +101,7 @@ services:
 
 > [!NOTE]
 >
-> API's auto cookie refreshing feature doesn't require `browser-cookie3`, and by default is enabled. It allows you to keep the API service running without worrying about cookie expiration.
+> API's auto cookie refreshing feature is enabled by default. It allows you to keep the API service running without worrying about cookie expiration.
 >
 > This feature may cause that you need to re-login to your Google account in the browser. This is an expected behavior and won't affect the API's functionality.
 >
@@ -133,7 +123,6 @@ Secure_1PSID = "COOKIE VALUE HERE"
 Secure_1PSIDTS = "COOKIE VALUE HERE"
 
 async def main():
-    # If browser-cookie3 is installed, simply use `client = GeminiClient()`
     client = GeminiClient(Secure_1PSID, Secure_1PSIDTS, proxy=None)
     await client.init(timeout=30, auto_close=False, close_delay=300, auto_refresh=True)
 

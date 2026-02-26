@@ -2,10 +2,9 @@ import os
 import time
 from pathlib import Path
 
-from httpx import AsyncClient, Cookies
-
 from ..constants import Endpoint, Headers
 from ..exceptions import AuthError
+from ..http_client import AsyncClient, Cookies
 
 
 def _get_secure_1psid(cookies: dict | Cookies) -> str | None:

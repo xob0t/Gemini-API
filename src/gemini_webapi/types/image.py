@@ -2,10 +2,16 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from httpx import AsyncClient, Cookies, HTTPError
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from ..http_client import AsyncClient, Cookies
 from ..utils import logger
+
+
+class HTTPError(Exception):
+    """HTTP error for compatibility."""
+
+    pass
 
 
 class Image(BaseModel):

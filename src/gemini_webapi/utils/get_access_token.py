@@ -4,11 +4,9 @@ import re
 from asyncio import Task
 from pathlib import Path
 
-from httpx import AsyncClient, Cookies, Response
-
 from ..constants import Endpoint, Headers
 from ..exceptions import AuthError
-from .load_browser_cookies import load_browser_cookies
+from ..http_client import AsyncClient, Cookies, Response
 from .logger import logger
 
 
@@ -136,57 +134,6 @@ def _add_all_cached_cookie_tasks(
         logger.debug("Skipping loading cached cookies. Cookies will be cached after successful initialization.")
 
 
-def _add_browser_cookie_tasks(
-    tasks: list[Task],
-    base_cookies: dict | Cookies,
-    proxy: str | None,
-    verbose: bool,
-) -> None:
-    """Add tasks for browser cookies if browser-cookie3 is available."""
-    try:
-        browser_cookies = load_browser_cookies(domain_name="google.com", verbose=verbose)
-    except ImportError:
-        if verbose:
-            logger.debug("Skipping loading local browser cookies. Optional dependency 'browser-cookie3' is not installed.")
-        return
-    except Exception as e:
-        if verbose:
-            logger.warning(f"Skipping loading local browser cookies. {e}")
-        return
-
-    if not browser_cookies:
-        if verbose:
-            logger.debug("Skipping loading local browser cookies. Login to gemini.google.com in your browser first.")
-        return
-
-    valid_browser_cookies = 0
-    for browser, cookies in browser_cookies.items():
-        secure_1psid = cookies.get("__Secure-1PSID")
-        if not secure_1psid:
-            continue
-
-        # Skip if PSID doesn't match provided base cookies
-        if "__Secure-1PSID" in base_cookies and base_cookies["__Secure-1PSID"] != secure_1psid:
-            if verbose:
-                logger.debug(f"Skipping loading local browser cookies from {browser}. __Secure-1PSID does not match the one provided.")
-            continue
-
-        local_cookies: dict[str, str] = {"__Secure-1PSID": secure_1psid}
-        if secure_1psidts := cookies.get("__Secure-1PSIDTS"):
-            local_cookies["__Secure-1PSIDTS"] = secure_1psidts
-        if nid := cookies.get("NID"):
-            local_cookies["NID"] = nid
-
-        tasks.append(Task(send_request(local_cookies, proxy=proxy)))
-        valid_browser_cookies += 1
-
-        if verbose:
-            logger.debug(f"Loaded local browser cookies from {browser}")
-
-    if valid_browser_cookies == 0 and verbose:
-        logger.debug("Skipping loading local browser cookies. Login to gemini.google.com in your browser first.")
-
-
 def _extract_tokens_from_response(response_text: str) -> tuple[str | None, str | None, str | None]:
     """Extract SNlM0e, cfb2h, and FdrFJe tokens from response HTML."""
     snlm0e_match = re.search(r'"SNlM0e":\s*"(.*?)"', response_text)
@@ -216,7 +163,6 @@ async def get_access_token(
     Possible cookie sources:
     - Base cookies passed to the function.
     - __Secure-1PSID from base cookies with __Secure-1PSIDTS from cache.
-    - Local browser cookies (if optional dependency `browser-cookie3` is installed).
 
     Parameters
     ----------
@@ -251,7 +197,6 @@ async def get_access_token(
     tasks: list[Task] = []
     _add_base_cookie_task(tasks, base_cookies, extra_cookies, proxy, verbose)
     _add_cached_cookie_tasks(tasks, base_cookies, extra_cookies, cache_dir, secure_1psid, proxy, verbose)
-    _add_browser_cookie_tasks(tasks, base_cookies, proxy, verbose)
 
     if not tasks:
         raise AuthError("No valid cookies available for initialization. Please pass __Secure-1PSID and __Secure-1PSIDTS manually.")

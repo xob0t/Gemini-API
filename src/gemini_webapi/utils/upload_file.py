@@ -2,10 +2,10 @@ import io
 import random
 from pathlib import Path
 
-from httpx import AsyncClient
 from pydantic import ConfigDict, validate_call
 
 from ..constants import Endpoint, Headers
+from ..http_client import AsyncClient
 
 
 def _generate_random_name(extension: str = ".txt") -> str:

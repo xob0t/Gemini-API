@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import orjson as json
-from httpx import AsyncClient, Cookies, ReadTimeout, Response
 
 from .components import GemMixin
 from .constants import GRPC, Endpoint, ErrorCode, Headers, Model
@@ -24,6 +23,7 @@ from .exceptions import (
     TemporarilyBlocked,
     UsageLimitExceeded,
 )
+from .http_client import AsyncClient, Cookies, ReadTimeout, Response
 from .types import (
     Candidate,
     Gem,
@@ -136,9 +136,6 @@ class GeminiClient(GemMixin):
     """
     Async httpx client interface for gemini.google.com.
 
-    `secure_1psid` must be provided unless the optional dependency `browser-cookie3` is installed, and
-    you have logged in to google.com in your local browser.
-
     Parameters
     ----------
     secure_1psid: `str`, optional
@@ -150,11 +147,6 @@ class GeminiClient(GemMixin):
     kwargs: `dict`, optional
         Additional arguments which will be passed to the http client.
         Refer to `httpx.AsyncClient` for more information.
-
-    Raises
-    ------
-    `ValueError`
-        If `browser-cookie3` is installed but cookies for google.com are not found in your local browser storage.
     """
 
     __slots__ = [

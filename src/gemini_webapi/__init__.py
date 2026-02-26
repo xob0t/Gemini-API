@@ -10,7 +10,12 @@ from .exceptions import (
     UsageLimitExceeded,
 )
 from .types import Candidate, Gem, GemJar, GeneratedImage, Image, ModelOutput, RPCData, WebImage
-from .utils import logger, set_log_level
+from .utils import (
+    load_netscape_cookies,
+    load_netscape_cookies_as_dict,
+    logger,
+    set_log_level,
+)
 
 __all__ = [
     "APIError",
@@ -31,6 +36,8 @@ __all__ = [
     "TemporarilyBlocked",
     "UsageLimitExceeded",
     "WebImage",
+    "load_netscape_cookies",
+    "load_netscape_cookies_as_dict",
     "logger",
     "set_log_level",
 ]
