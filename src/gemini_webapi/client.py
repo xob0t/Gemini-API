@@ -369,6 +369,7 @@ class GeminiClient(GemMixin):
         model: Model | str | dict = Model.UNSPECIFIED,
         gem: Gem | str | None = None,
         chat: Optional["ChatSession"] = None,
+        use_pro: bool = False,
         **kwargs,
     ) -> ModelOutput:
         """
@@ -389,6 +390,9 @@ class GeminiClient(GemMixin):
             Pass either a `gemini_webapi.types.Gem` object or a gem id string.
         chat: `ChatSession`, optional
             Chat data to retrieve conversation history. If None, will automatically generate a new chat id when sending post request.
+        use_pro: `bool`, optional
+            If True, use Nano Banana Pro for image generation. This enables enhanced image generation
+            capabilities. Default is False.
         kwargs: `dict`, optional
             Additional arguments which will be passed to the post request.
             Refer to `httpx.AsyncClient.request` for more information.
@@ -451,6 +455,7 @@ class GeminiClient(GemMixin):
                 gem=gem,
                 chat=chat,
                 streaming_state=streaming_state,
+                use_pro=use_pro,
                 **kwargs,
             ):
                 pass  # Consume generator to get final output; 'output' is used after loop
@@ -477,6 +482,7 @@ class GeminiClient(GemMixin):
         model: Model | str | dict = Model.UNSPECIFIED,
         gem: Gem | str | None = None,
         chat: Optional["ChatSession"] = None,
+        use_pro: bool = False,
         **kwargs,
     ) -> AsyncGenerator[ModelOutput, None]:
         """
@@ -498,6 +504,8 @@ class GeminiClient(GemMixin):
             Specify a gem to use as system prompt for the chat session.
         chat: `ChatSession`, optional
             Chat data to retrieve conversation history.
+        use_pro: `bool`, optional
+            If True, use Nano Banana Pro for image generation. Default is False.
         kwargs: `dict`, optional
             Additional arguments passed to `httpx.AsyncClient.stream`.
 
@@ -554,6 +562,7 @@ class GeminiClient(GemMixin):
                 gem=gem,
                 chat=chat,
                 streaming_state=streaming_state,
+                use_pro=use_pro,
                 **kwargs,
             ):
                 yield output
@@ -577,6 +586,7 @@ class GeminiClient(GemMixin):
         gem: Gem | str | None = None,
         chat: Optional["ChatSession"] = None,
         streaming_state: _StreamingState | None = None,
+        use_pro: bool = False,
         **kwargs,
     ) -> AsyncGenerator[ModelOutput, None]:
         """
@@ -598,7 +608,7 @@ class GeminiClient(GemMixin):
         gem_id = gem.id if isinstance(gem, Gem) else gem
 
         try:
-            message_content = [
+            message_content: list[Any] = [
                 prompt,
                 0,
                 None,
@@ -608,18 +618,25 @@ class GeminiClient(GemMixin):
                 0,
             ]
 
+            # Add "use pro" flag for image regeneration with Nano Banana Pro
+            if use_pro:
+                # Extend message_content to include the pro flag at index 9
+                message_content.extend([None, None, [None, None, None, None, None, None, [None, [1]]]])
+
             params: dict[str, Any] = {"_reqid": _reqid, "rt": "c"}
             if self.build_label:
                 params["bl"] = self.build_label
             if self.session_id:
                 params["f.sid"] = self.session_id
 
-            inner_req_list: list[Any] = [None] * 69
+            inner_req_list: list[Any] = [None] * 73  # Extend to support index 32
             inner_req_list[0] = message_content
             inner_req_list[2] = chat.metadata if chat else ["", "", "", None, None, None, None, None, None, ""]
             inner_req_list[7] = 1  # Enable Snapshot Streaming
             if gem_id:
                 inner_req_list[19] = gem_id
+            if use_pro:
+                inner_req_list[32] = 1  # Enable pro regeneration
 
             request_data = {
                 "at": self.access_token,
