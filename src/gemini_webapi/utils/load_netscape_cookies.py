@@ -11,7 +11,7 @@ domain, domain_specified, path, secure, expiration, name, value
 
 from pathlib import Path
 
-from ..http_client import Cookies
+from curl_cffi.requests import Cookies
 
 
 def load_netscape_cookies(
@@ -35,7 +35,7 @@ def load_netscape_cookies(
     Returns
     -------
     Cookies
-        httpx Cookies object containing the loaded cookies with proper domains.
+        curl_cffi Cookies object containing the loaded cookies with proper domains.
 
     Raises
     ------
@@ -76,7 +76,7 @@ def parse_netscape_cookies(
     Returns
     -------
     Cookies
-        httpx Cookies object containing the parsed cookies with proper domains.
+        curl_cffi Cookies object containing the parsed cookies with proper domains.
     """
     lines = content.splitlines()
     cookies = Cookies()

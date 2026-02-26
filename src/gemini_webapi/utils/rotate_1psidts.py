@@ -2,9 +2,11 @@ import os
 import time
 from pathlib import Path
 
+from curl_cffi import CurlHttpVersion
+from curl_cffi.requests import AsyncSession, Cookies
+
 from ..constants import Endpoint, Headers
 from ..exceptions import AuthError
-from ..http_client import AsyncClient, Cookies
 
 
 def _get_secure_1psid(cookies: dict | Cookies) -> str | None:
@@ -35,21 +37,21 @@ async def rotate_1psidts(cookies: dict | Cookies, proxy: str | None = None) -> t
 
     Parameters
     ----------
-    cookies : `dict | httpx.Cookies`
+    cookies : `dict | curl_cffi.requests.Cookies`
         Cookies to be used in the request.
     proxy: `str`, optional
         Proxy URL.
 
     Returns
     -------
-    `tuple[str | None, httpx.Cookies | None]`
+    `tuple[str | None, curl_cffi.requests.Cookies | None]`
         New value of the __Secure-1PSIDTS cookie and the full updated cookies jar.
 
     Raises
     ------
     `gemini_webapi.AuthError`
         If request failed with 401 Unauthorized.
-    `httpx.HTTPStatusError`
+    `curl_cffi.requests.errors.RequestsError`
         If request failed with other status codes.
     """
     cache_dir = _get_cache_dir()
@@ -66,12 +68,20 @@ async def rotate_1psidts(cookies: dict | Cookies, proxy: str | None = None) -> t
         return cache_file.read_text(), None
 
     # Request new cookie rotation
-    async with AsyncClient(http2=True, proxy=proxy) as client:
+    async with AsyncSession(
+        proxy=proxy,
+        impersonate="chrome",
+        http_version=CurlHttpVersion.V2_0,
+    ) as client:
+        client.headers.update(Headers.ROTATE_COOKIES.value)
+        if isinstance(cookies, dict):
+            client.cookies = Cookies(cookies)
+        else:
+            client.cookies = cookies
+
         response = await client.post(
             url=Endpoint.ROTATE_COOKIES,
-            headers=Headers.ROTATE_COOKIES.value,
-            cookies=cookies,
-            content='[000,"-0000000000000000000"]',
+            data='[000,"-0000000000000000000"]',
         )
 
         if response.status_code == 401:

@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 import orjson as json
+from curl_cffi import CurlHttpVersion
+from curl_cffi.requests import AsyncSession, Cookies, Response
+from curl_cffi.requests.errors import RequestsError
 
 from .components import GemMixin
 from .constants import GRPC, Endpoint, ErrorCode, Headers, Model
@@ -25,7 +28,6 @@ from .exceptions import (
     TemporarilyBlocked,
     UsageLimitExceeded,
 )
-from .http_client import AsyncClient, Cookies, ReadTimeout, Response
 from .types import (
     Candidate,
     Gem,
@@ -90,7 +92,7 @@ def _raise_for_error_code(error_code: int, model_name: str) -> None:
             raise APIError(f"Failed to generate contents (stream). Unknown API error code: {error_code}. This might be a temporary Google service issue.")
 
 
-def _parse_web_images(candidate_data: list[Any], proxy: str | None) -> list[WebImage]:
+def _parse_web_images(candidate_data: list[Any], proxy: str | None, session_kwargs: dict | None = None) -> list[WebImage]:
     """Extract web images from candidate data."""
     web_images = []
     for web_img_data in get_nested_value(candidate_data, [12, 1], []):
@@ -102,12 +104,13 @@ def _parse_web_images(candidate_data: list[Any], proxy: str | None) -> list[WebI
                     title=get_nested_value(web_img_data, [7, 0], ""),
                     alt=get_nested_value(web_img_data, [0, 4], ""),
                     proxy=proxy,
+                    session_kwargs=session_kwargs or {},
                 )
             )
     return web_images
 
 
-def _parse_generated_images(candidate_data: list[Any], proxy: str | None, cookies: Cookies, account_index: int = 0) -> list[GeneratedImage]:
+def _parse_generated_images(candidate_data: list[Any], proxy: str | None, cookies: Cookies, account_index: int = 0, session_kwargs: dict | None = None) -> list[GeneratedImage]:
     """Extract generated images from candidate data."""
     generated_images = []
     for gen_img_data in get_nested_value(candidate_data, [12, 7, 0], []):
@@ -122,12 +125,13 @@ def _parse_generated_images(candidate_data: list[Any], proxy: str | None, cookie
                     proxy=proxy,
                     cookies=cookies,
                     account_index=account_index,
+                    session_kwargs=session_kwargs or {},
                 )
             )
     return generated_images
 
 
-def _parse_generated_videos(candidate_data: list[Any], proxy: str | None, cookies: Cookies, account_index: int = 0) -> list[GeneratedVideo]:
+def _parse_generated_videos(candidate_data: list[Any], proxy: str | None, cookies: Cookies, account_index: int = 0, session_kwargs: dict | None = None) -> list[GeneratedVideo]:
     """Extract generated videos from candidate data.
 
     Video data is found at [12, 59, 0, 0, 0] in the candidate response.
@@ -168,6 +172,7 @@ def _parse_generated_videos(candidate_data: list[Any], proxy: str | None, cookie
                     proxy=proxy,
                     cookies=cookies,
                     account_index=account_index,
+                    session_kwargs=session_kwargs or {},
                 )
             )
 
@@ -220,7 +225,7 @@ def _extract_candidate_text(candidate_data: list[Any]) -> str:
 
 class GeminiClient(GemMixin):
     """
-    Async httpx client interface for gemini.google.com.
+    Async client interface for gemini.google.com using curl_cffi.
 
     Parameters
     ----------
@@ -236,7 +241,7 @@ class GeminiClient(GemMixin):
         Defaults to 0 (first account).
     kwargs: `dict`, optional
         Additional arguments which will be passed to the http client.
-        Refer to `httpx.AsyncClient` for more information.
+        Refer to `curl_cffi.requests.AsyncSession` for more information.
     """
 
     __slots__ = [
@@ -258,6 +263,7 @@ class GeminiClient(GemMixin):
         "refresh_interval",
         "refresh_task",
         "session_id",
+        "session_kwargs",
         "timeout",
         "verbose",
         "watchdog_timeout",
@@ -276,7 +282,7 @@ class GeminiClient(GemMixin):
         self.proxy = proxy
         self.account_index = account_index
         self._running: bool = False
-        self.client: AsyncClient | None = None
+        self.client: AsyncSession | None = None
         self.access_token: str | None = None
         self.build_label: str | None = None
         self.session_id: str | None = None
@@ -338,23 +344,30 @@ class GeminiClient(GemMixin):
             try:
                 self.verbose = verbose
                 self.watchdog_timeout = watchdog_timeout
+
+                # Store kwargs for use by Image/Video save methods
+                self.session_kwargs = dict(self.kwargs)
+
+                # Create session first and reuse it for get_access_token
+                self.client = AsyncSession(
+                    timeout=timeout,
+                    proxy=self.proxy,
+                    allow_redirects=True,
+                    http_version=CurlHttpVersion.V2_0,
+                    impersonate=self.kwargs.pop("impersonate", "chrome"),
+                    **self.kwargs,
+                )
+                self.client.headers.update(Headers.GEMINI.value)
+
                 access_token, build_label, session_id, valid_cookies = await get_access_token(
                     base_cookies=self.cookies,
                     proxy=self.proxy,
                     verbose=self.verbose,
-                    verify=self.kwargs.get("verify", True),
                     account_index=self.account_index,
+                    session=self.client,
                 )
 
-                self.client = AsyncClient(
-                    http2=True,
-                    timeout=timeout,
-                    proxy=self.proxy,
-                    follow_redirects=True,
-                    headers=Headers.GEMINI.value,
-                    cookies=valid_cookies,
-                    **self.kwargs,
-                )
+                self.client.cookies = valid_cookies
                 self.access_token = access_token
                 self.cookies = valid_cookies
                 self.build_label = build_label
@@ -407,7 +420,7 @@ class GeminiClient(GemMixin):
             self.refresh_task = None
 
         if self.client:
-            await self.client.aclose()
+            await self.client.close()
 
     async def reset_close_task(self) -> None:
         """
@@ -489,7 +502,7 @@ class GeminiClient(GemMixin):
             capabilities. Default is False.
         kwargs: `dict`, optional
             Additional arguments which will be passed to the post request.
-            Refer to `httpx.AsyncClient.request` for more information.
+            Refer to `curl_cffi.requests.AsyncSession.request` for more information.
 
         Returns
         -------
@@ -527,7 +540,7 @@ class GeminiClient(GemMixin):
                 ]
             )
 
-            uploaded_urls = await asyncio.gather(*(upload_file(file, self.proxy) for file in files))
+            uploaded_urls = await asyncio.gather(*(upload_file(file, self.proxy, session=self.client) for file in files))
             file_data = [[[url], parse_file_name(file)] for url, file in zip(uploaded_urls, files, strict=True)]
 
         try:
@@ -601,7 +614,7 @@ class GeminiClient(GemMixin):
         use_pro: `bool`, optional
             If True, use Nano Banana Pro for image generation. Default is False.
         kwargs: `dict`, optional
-            Additional arguments passed to `httpx.AsyncClient.stream`.
+            Additional arguments passed to `curl_cffi.requests.AsyncSession.request`.
 
         Yields
         ------
@@ -634,7 +647,7 @@ class GeminiClient(GemMixin):
                 ]
             )
 
-            uploaded_urls = await asyncio.gather(*(upload_file(file, self.proxy) for file in files))
+            uploaded_urls = await asyncio.gather(*(upload_file(file, self.proxy, session=self.client) for file in files))
             file_data = [[[url], parse_file_name(file)] for url, file in zip(uploaded_urls, files, strict=True)]
 
         try:
@@ -742,77 +755,79 @@ class GeminiClient(GemMixin):
                 ).decode("utf-8"),
             }
 
-            async with self.client.stream(
+            response = await self.client.request(
                 "POST",
                 Endpoint.get_generate_url(self.account_index),
                 params=params,
                 headers=model.model_header,
                 data=request_data,
+                stream=True,
                 **kwargs,
-            ) as response:
-                if response.status_code != 200:
+            )
+
+            if response.status_code != 200:
+                await self.close()
+                raise APIError(f"Failed to generate contents. Status: {response.status_code}")
+
+            if self.client:
+                self.cookies.update(self.client.cookies)
+
+            buffer = ""
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+            # Track last seen content. streaming_state allows persistence across retries.
+            if streaming_state is None:
+                streaming_state = _StreamingState()
+
+            last_texts = streaming_state.last_texts
+            last_thoughts = streaming_state.last_thoughts
+            last_progress_time = streaming_state.last_progress_time
+            flags = _StreamFlags()
+
+            async for chunk in response.aiter_content():
+                buffer += decoder.decode(chunk, final=False)
+                if buffer.startswith(")]}'"):
+                    buffer = buffer[4:].lstrip()
+                parsed_parts, buffer = parse_response_by_frame(buffer)
+
+                got_update = False
+                for part in parsed_parts:
+                    result = await self._process_stream_part(part, model, chat, last_texts, last_thoughts, flags)
+                    if result:
+                        yield result
+                        got_update = True
+
+                if got_update or flags.is_thinking:
+                    last_progress_time = time.time()
+                    streaming_state.last_progress_time = last_progress_time
+                    continue
+
+                stall_threshold = min(self.timeout, self.watchdog_timeout)
+                if (time.time() - last_progress_time) > stall_threshold:
+                    logger.warning(f"Response stalled (active connection but no progress for {stall_threshold}s). Queueing={flags.is_queueing}. Retrying...")
                     await self.close()
-                    raise APIError(f"Failed to generate contents. Status: {response.status_code}")
+                    raise APIError("Response stalled (zombie stream).")
 
-                if self.client:
-                    self.cookies.update(self.client.cookies)
+            # Final flush
+            buffer += decoder.decode(b"", final=True)
+            if buffer:
+                parsed_parts, _ = parse_response_by_frame(buffer)
+                for part in parsed_parts:
+                    result = await self._process_stream_part(part, model, chat, last_texts, last_thoughts, flags)
+                    if result:
+                        yield result
 
-                buffer = ""
-                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            if not (flags.is_completed or flags.is_final_chunk) or flags.is_thinking or flags.is_queueing:
+                logger.debug(f"Stream interrupted (completed={flags.is_completed}, final_chunk={flags.is_final_chunk}, thinking={flags.is_thinking}, queueing={flags.is_queueing}). Polling again...")
+                raise APIError("Stream interrupted or truncated.")
 
-                # Track last seen content. streaming_state allows persistence across retries.
-                if streaming_state is None:
-                    streaming_state = _StreamingState()
-
-                last_texts = streaming_state.last_texts
-                last_thoughts = streaming_state.last_thoughts
-                last_progress_time = streaming_state.last_progress_time
-                flags = _StreamFlags()
-
-                async for chunk in response.aiter_bytes():
-                    buffer += decoder.decode(chunk, final=False)
-                    if buffer.startswith(")]}'"):
-                        buffer = buffer[4:].lstrip()
-                    parsed_parts, buffer = parse_response_by_frame(buffer)
-
-                    got_update = False
-                    for part in parsed_parts:
-                        result = await self._process_stream_part(part, model, chat, last_texts, last_thoughts, flags)
-                        if result:
-                            yield result
-                            got_update = True
-
-                    if got_update or flags.is_thinking:
-                        last_progress_time = time.time()
-                        streaming_state.last_progress_time = last_progress_time
-                        continue
-
-                    stall_threshold = min(self.timeout, self.watchdog_timeout)
-                    if (time.time() - last_progress_time) > stall_threshold:
-                        logger.warning(f"Response stalled (active connection but no progress for {stall_threshold}s). Queueing={flags.is_queueing}. Retrying...")
-                        await self.close()
-                        raise APIError("Response stalled (zombie stream).")
-
-                # Final flush
-                buffer += decoder.decode(b"", final=True)
-                if buffer:
-                    parsed_parts, _ = parse_response_by_frame(buffer)
-                    for part in parsed_parts:
-                        result = await self._process_stream_part(part, model, chat, last_texts, last_thoughts, flags)
-                        if result:
-                            yield result
-
-                if not (flags.is_completed or flags.is_final_chunk) or flags.is_thinking or flags.is_queueing:
-                    logger.debug(
-                        f"Stream interrupted (completed={flags.is_completed}, final_chunk={flags.is_final_chunk}, thinking={flags.is_thinking}, queueing={flags.is_queueing}). Polling again..."
-                    )
-                    raise APIError("Stream interrupted or truncated.")
-
-        except ReadTimeout as exc:
-            raise RequestTimeoutError(
-                "The request timed out while waiting for Gemini to respond. This often happens with very long prompts "
-                "or complex file analysis. Try increasing the 'timeout' value when initializing GeminiClient."
-            ) from exc
+        except RequestsError as exc:
+            if "timeout" in str(exc).lower():
+                raise RequestTimeoutError(
+                    "The request timed out while waiting for Gemini to respond. This often happens with very long prompts "
+                    "or complex file analysis. Try increasing the 'timeout' value when initializing GeminiClient."
+                ) from exc
+            raise
         except (GeminiError, APIError):
             raise
         except Exception as e:
@@ -933,9 +948,9 @@ class GeminiClient(GemMixin):
 
         thoughts = get_nested_value(candidate_data, [37, 0, 0]) or ""
 
-        web_images = _parse_web_images(candidate_data, self.proxy)
-        generated_images = _parse_generated_images(candidate_data, self.proxy, self.cookies, self.account_index)
-        generated_videos = _parse_generated_videos(candidate_data, self.proxy, self.cookies, self.account_index)
+        web_images = _parse_web_images(candidate_data, self.proxy, self.session_kwargs)
+        generated_images = _parse_generated_images(candidate_data, self.proxy, self.cookies, self.account_index, self.session_kwargs)
+        generated_videos = _parse_generated_videos(candidate_data, self.proxy, self.cookies, self.account_index, self.session_kwargs)
 
         # Determine if this frame represents the final state
         flags.is_final_chunk = isinstance(get_nested_value(candidate_data, [2]), list) or get_nested_value(candidate_data, [8, 0], 1) == 2
@@ -1017,11 +1032,11 @@ class GeminiClient(GemMixin):
             List of `gemini_webapi.types.RPCData` objects to be executed.
         kwargs: `dict`, optional
             Additional arguments which will be passed to the post request.
-            Refer to `httpx.AsyncClient.request` for more information.
+            Refer to `curl_cffi.requests.AsyncSession.request` for more information.
 
         Returns
         -------
-        :class:`httpx.Response`
+        :class:`curl_cffi.requests.Response`
             Response object containing the result of the batch execution.
         """
 
@@ -1049,11 +1064,13 @@ class GeminiClient(GemMixin):
                 },
                 **kwargs,
             )
-        except ReadTimeout as exc:
-            raise RequestTimeoutError(
-                "The request timed out while waiting for Gemini to respond. This often happens with very long prompts "
-                "or complex file analysis. Try increasing the 'timeout' value when initializing GeminiClient."
-            ) from exc
+        except RequestsError as exc:
+            if "timeout" in str(exc).lower():
+                raise RequestTimeoutError(
+                    "The request timed out while waiting for Gemini to respond. This often happens with very long prompts "
+                    "or complex file analysis. Try increasing the 'timeout' value when initializing GeminiClient."
+                ) from exc
+            raise
 
         if response.status_code != 200:
             await self.close()
@@ -1072,7 +1089,7 @@ class ChatSession:
     Parameters
     ----------
     geminiclient: `GeminiClient`
-        Async httpx client interface for gemini.google.com.
+        Async client interface for gemini.google.com.
     metadata: `list[str]`, optional
         List of chat metadata `[cid, rid, rcid]`, can be shorter than 3 elements, like `[cid, rid]` or `[cid]` only.
     cid: `str`, optional
@@ -1164,7 +1181,7 @@ class ChatSession:
             List of file paths to be attached.
         kwargs: `dict`, optional
             Additional arguments which will be passed to the post request.
-            Refer to `httpx.AsyncClient.request` for more information.
+            Refer to `curl_cffi.requests.AsyncSession.request` for more information.
 
         Returns
         -------

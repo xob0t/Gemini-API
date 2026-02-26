@@ -2,9 +2,10 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from curl_cffi import CurlHttpVersion
+from curl_cffi.requests import AsyncSession, Cookies
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from ..http_client import AsyncClient, Cookies
 from ..utils import logger
 
 
@@ -28,6 +29,8 @@ class Image(BaseModel):
         Optional description of the image.
     proxy: `str`, optional
         Proxy used when saving image.
+    session_kwargs: `dict`, optional
+        Additional kwargs to pass to the HTTP session (e.g., verify=False).
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -36,6 +39,7 @@ class Image(BaseModel):
     title: str = "[Image]"
     alt: str = ""
     proxy: str | None = None
+    session_kwargs: dict = {}
 
     def __str__(self):
         return f"Image(title='{self.title}', alt='{self.alt}', url='{(len(self.url) <= 20 and self.url) or self.url[:8] + '...' + self.url[-12:]}')"
@@ -71,7 +75,7 @@ class Image(BaseModel):
 
         Raises
         ------
-        `httpx.HTTPError`
+        `HTTPError`
             If the network request failed.
         """
 
@@ -113,7 +117,15 @@ class Image(BaseModel):
                 # Assume it's already a Cookies object, copy it
                 download_cookies = cookies
 
-        async with AsyncClient(http2=True, follow_redirects=True, headers=headers, cookies=download_cookies, proxy=self.proxy) as client:
+        async with AsyncSession(
+            proxy=self.proxy,
+            allow_redirects=True,
+            impersonate="chrome",
+            http_version=CurlHttpVersion.V2_0,
+            **self.session_kwargs,
+        ) as client:
+            client.headers.update(headers)
+            client.cookies = download_cookies
             # Google uses text-based redirects where the response body contains the next URL
             # The redirect chain is:
             # 1. lh3.googleusercontent.com/gg/... -> text/plain body with redirect URL (no cookies needed)
@@ -148,7 +160,7 @@ class Image(BaseModel):
                         continue
 
                 # Unknown content type, stop
-                logger.debug(f"  Unknown content type, stopping")
+                logger.debug("  Unknown content type, stopping")
                 break
 
             if response is not None and response.status_code == 200 and "image" in response.headers.get("content-type", ""):
@@ -181,7 +193,7 @@ class GeneratedImage(Image):
 
     Parameters
     ----------
-    cookies: `dict | httpx.Cookies`
+    cookies: `dict | curl_cffi.requests.Cookies`
         Cookies used for requesting the content of the generated image, inherit from GeminiClient object or manually set.
         Should contain valid "__Secure-1PSID" and "__Secure-1PSIDTS" values.
     account_index: `int`, optional

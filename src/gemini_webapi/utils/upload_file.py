@@ -2,10 +2,11 @@ import io
 import random
 from pathlib import Path
 
+from curl_cffi import CurlHttpVersion, CurlMime
+from curl_cffi.requests import AsyncSession
 from pydantic import ConfigDict, validate_call
 
 from ..constants import Endpoint, Headers
-from ..http_client import AsyncClient
 
 
 def _generate_random_name(extension: str = ".txt") -> str:
@@ -21,6 +22,7 @@ async def upload_file(
     file: str | Path | bytes | io.BytesIO,
     proxy: str | None = None,
     filename: str | None = None,
+    session: AsyncSession | None = None,
 ) -> str:
     """
     Upload a file to Google's server and return its identifier.
@@ -33,6 +35,8 @@ async def upload_file(
         Proxy URL.
     filename: `str`, optional
         Name of the file to be uploaded. Required if file is bytes or BytesIO.
+    session: `AsyncSession`, optional
+        Existing session to use for the request.
 
     Returns
     -------
@@ -42,7 +46,7 @@ async def upload_file(
 
     Raises
     ------
-    `httpx.HTTPStatusError`
+    `curl_cffi.requests.errors.RequestsError`
         If the upload request failed.
     """
 
@@ -64,11 +68,29 @@ async def upload_file(
     else:
         raise ValueError(f"Unsupported file type: {type(file)}")
 
-    async with AsyncClient(http2=True, proxy=proxy, follow_redirects=True) as client:
+    # Use CurlMime for multipart file upload
+    multipart = CurlMime()
+    multipart.addpart(name="file", filename=filename, data=file_content)
+
+    if session is not None:
+        response = await session.post(
+            url=Endpoint.UPLOAD,
+            headers=Headers.UPLOAD.value,
+            multipart=multipart,
+        )
+        response.raise_for_status()
+        return response.text
+
+    async with AsyncSession(
+        proxy=proxy,
+        allow_redirects=True,
+        impersonate="chrome",
+        http_version=CurlHttpVersion.V2_0,
+    ) as client:
         response = await client.post(
             url=Endpoint.UPLOAD,
             headers=Headers.UPLOAD.value,
-            files={"file": (filename, file_content)},
+            multipart=multipart,
         )
         response.raise_for_status()
         return response.text

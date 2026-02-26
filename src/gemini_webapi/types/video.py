@@ -1,9 +1,10 @@
 from datetime import datetime
 from pathlib import Path
 
+from curl_cffi import CurlHttpVersion
+from curl_cffi.requests import AsyncSession, Cookies
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from ..http_client import AsyncClient, Cookies
 from ..utils import logger
 
 
@@ -25,13 +26,15 @@ class GeneratedVideo(BaseModel):
         URL of the video thumbnail image.
     title: `str`, optional
         Title of the video, by default is "[Generated Video]".
-    cookies: `dict | httpx.Cookies`
+    cookies: `dict | curl_cffi.requests.Cookies`
         Cookies used for requesting the content of the generated video, inherit from GeminiClient object or manually set.
         Should contain valid "__Secure-1PSID" and "__Secure-1PSIDTS" values.
     proxy: `str`, optional
         Proxy used when downloading video.
     account_index: `int`, optional
         Google account index for multi-account cookie support, by default 0.
+    session_kwargs: `dict`, optional
+        Additional kwargs to pass to the HTTP session (e.g., verify=False).
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -42,6 +45,7 @@ class GeneratedVideo(BaseModel):
     cookies: dict[str, str] | Cookies
     proxy: str | None = None
     account_index: int = 0
+    session_kwargs: dict = {}
 
     @field_validator("cookies", mode="after")
     @classmethod
@@ -125,7 +129,15 @@ class GeneratedVideo(BaseModel):
                 # Assume it's already a Cookies object, copy it
                 download_cookies = actual_cookies
 
-        async with AsyncClient(http2=True, follow_redirects=True, headers=headers, cookies=download_cookies, proxy=self.proxy) as client:
+        async with AsyncSession(
+            proxy=self.proxy,
+            allow_redirects=True,
+            impersonate="chrome",
+            http_version=CurlHttpVersion.V2_0,
+            **self.session_kwargs,
+        ) as client:
+            client.headers.update(headers)
+            client.cookies = download_cookies
             response = await client.get(download_url)
 
             if response.status_code == 200:
@@ -207,7 +219,16 @@ class GeneratedVideo(BaseModel):
             else:
                 download_cookies = actual_cookies
 
-        async with AsyncClient(http2=True, follow_redirects=True, headers=headers, cookies=download_cookies, proxy=self.proxy) as client:
+        async with AsyncSession(
+            proxy=self.proxy,
+            allow_redirects=True,
+            impersonate="chrome",
+            http_version=CurlHttpVersion.V2_0,
+            **self.session_kwargs,
+        ) as client:
+            client.headers.update(headers)
+            client.cookies = download_cookies
+
             # Follow text-based redirect chain
             current_url = self.thumbnail_url
             max_redirects = 5
