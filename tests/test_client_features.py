@@ -4,7 +4,7 @@ from pathlib import Path
 
 from gemini_webapi import Gem, GeminiClient, logger, set_log_level
 from gemini_webapi.constants import Model
-from gemini_webapi.exceptions import ModelInvalid, UsageLimitExceeded
+from gemini_webapi.exceptions import ModelInvalid, RateLimitExceeded, UsageLimitExceeded
 from gemini_webapi.utils import load_netscape_cookies_as_dict
 
 logging.getLogger("asyncio").setLevel(logging.ERROR)
@@ -181,6 +181,30 @@ class TestGeminiClient(unittest.IsolatedAsyncioTestCase):
         followup_response = await chat.send_message("Tell me more about it.")
         logger.warning(new_candidate.text)
         logger.warning(followup_response.text)
+
+    @logger.catch(reraise=True)
+    async def test_video_generation(self):
+        try:
+            response = await self.geminiclient.generate_content("Generate a short video of a cat playing with a ball of yarn")
+            logger.debug(response.text)
+            if response.videos:
+                logger.debug(f"Generated {len(response.videos)} video(s)")
+                for video in response.videos:
+                    logger.debug(video)
+                    # Test saving the video
+                    saved_path = await video.save(path="temp", verbose=True)
+                    logger.debug(f"Video saved to: {saved_path}")
+                    self.assertIsNotNone(saved_path)
+                    # Test saving thumbnail if available
+                    if video.thumbnail_url:
+                        thumb_path = await video.save_thumbnail(path="temp", verbose=True)
+                        logger.debug(f"Thumbnail saved to: {thumb_path}")
+            else:
+                logger.warning("No videos returned - video generation may not be available for this account")
+                self.skipTest("Video generation not available for this account")
+        except RateLimitExceeded as e:
+            logger.warning(f"Rate limited: {e}")
+            self.skipTest("Rate limited by Gemini - try again later")
 
 
 if __name__ == "__main__":

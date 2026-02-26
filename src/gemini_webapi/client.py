@@ -18,7 +18,9 @@ from .exceptions import (
     APIError,
     AuthError,
     GeminiError,
+    ImageGenerationBlocked,
     ModelInvalid,
+    RateLimitExceeded,
     RequestTimeoutError,
     TemporarilyBlocked,
     UsageLimitExceeded,
@@ -28,6 +30,7 @@ from .types import (
     Candidate,
     Gem,
     GeneratedImage,
+    GeneratedVideo,
     ModelOutput,
     RPCData,
     WebImage,
@@ -121,6 +124,87 @@ def _parse_generated_images(candidate_data: list[Any], proxy: str | None, cookie
                 )
             )
     return generated_images
+
+
+def _parse_generated_videos(candidate_data: list[Any], proxy: str | None, cookies: Cookies) -> list[GeneratedVideo]:
+    """Extract generated videos from candidate data.
+
+    Video data is found at [12, 59, 0, 0, 0] in the candidate response.
+    The video object contains:
+    - [0, 6, 0]: thumbnail URL (lh3.googleusercontent.com/gg/...)
+    - [0, 6, 1]: download URL (contribution.usercontent.google.com/download?...)
+    """
+    generated_videos = []
+
+    # Path: candidate_data[12][59][0][0][0] contains video entries
+    video_entries = get_nested_value(candidate_data, [12, 59, 0], [])
+
+    for video_entry in video_entries:
+        # Each video entry is at [0][0]
+        video_data = get_nested_value(video_entry, [0, 0], None)
+        if not video_data:
+            continue
+
+        # Get the URLs array at [6]
+        urls = get_nested_value(video_data, [6], [])
+        if not urls or len(urls) < 2:
+            continue
+
+        thumbnail_url = urls[0] if urls else ""
+        download_url = urls[1] if len(urls) > 1 else ""
+
+        # Only add if we have a download URL (contribution.usercontent.google.com)
+        if download_url and "usercontent.google.com" in download_url:
+            # Unescape Unicode sequences like \u003d to =
+            download_url = download_url.encode().decode("unicode_escape")
+
+            video_num = len(generated_videos) + 1
+            generated_videos.append(
+                GeneratedVideo(
+                    url=download_url,
+                    thumbnail_url=thumbnail_url,
+                    title=f"[Generated Video {video_num}]",
+                    proxy=proxy,
+                    cookies=cookies,
+                )
+            )
+
+    return generated_videos
+
+
+# Patterns indicating rate limiting by Gemini
+_RATE_LIMIT_PATTERNS = [
+    r"I couldn't do that because I'm getting a lot of requests right now",
+    r"I'm getting a lot of requests right now",
+    r"Please try again later",
+]
+
+_IMAGE_GEN_BLOCKED_PATTERNS = [
+    r"Are you signed in\?.*(?:search for images|can't.*create)",
+    r"can't seem to create any.*for you right now",
+    r"image creation isn't available in your location",
+    r"I can search for images, but can't.*create",
+]
+
+
+def _check_rate_limit_response(text: str) -> None:
+    """Check if the response text indicates a rate limit and raise exception if so."""
+    for pattern in _RATE_LIMIT_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
+            raise RateLimitExceeded(f"Gemini is rate limiting requests. Response: {text[:200]}... Please wait a moment before trying again.")
+
+
+def _check_image_gen_blocked(text: str) -> None:
+    """Check if the response indicates image generation is blocked due to auth or regional restrictions."""
+    for pattern in _IMAGE_GEN_BLOCKED_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
+            raise ImageGenerationBlocked(
+                f"Image generation is blocked for this account. This may be due to:\n"
+                f"  - Regional restrictions (image generation not available in your location)\n"
+                f"  - Authentication issues (cookies may be invalid or expired)\n"
+                f"  - Account restrictions\n"
+                f"Response: {text[:300]}..."
+            )
 
 
 def _extract_candidate_text(candidate_data: list[Any]) -> str:
@@ -830,10 +914,18 @@ class GeminiClient(GemMixin):
     ) -> Candidate | None:
         """Parse a single candidate from the response."""
         text = _extract_candidate_text(candidate_data)
+
+        # Check for rate limiting responses
+        _check_rate_limit_response(text)
+
+        # Check for image generation blocked responses
+        _check_image_gen_blocked(text)
+
         thoughts = get_nested_value(candidate_data, [37, 0, 0]) or ""
 
         web_images = _parse_web_images(candidate_data, self.proxy)
         generated_images = _parse_generated_images(candidate_data, self.proxy, self.cookies)
+        generated_videos = _parse_generated_videos(candidate_data, self.proxy, self.cookies)
 
         # Determine if this frame represents the final state
         flags.is_final_chunk = isinstance(get_nested_value(candidate_data, [2]), list) or get_nested_value(candidate_data, [8, 0], 1) == 2
@@ -849,7 +941,7 @@ class GeminiClient(GemMixin):
             thoughts_delta = ""
             new_full_thought = ""
 
-        if text_delta or thoughts_delta or web_images or generated_images:
+        if text_delta or thoughts_delta or web_images or generated_images or generated_videos:
             flags.has_candidates = True
 
         # Update state
@@ -864,6 +956,7 @@ class GeminiClient(GemMixin):
             thoughts_delta=thoughts_delta,
             web_images=web_images,
             generated_images=generated_images,
+            generated_videos=generated_videos,
         )
 
     def start_chat(self, **kwargs) -> "ChatSession":

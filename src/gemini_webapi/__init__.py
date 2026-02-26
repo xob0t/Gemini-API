@@ -3,13 +3,15 @@ from .exceptions import (
     APIError,
     AuthError,
     GeminiError,
+    ImageGenerationBlocked,
     ImageGenerationError,
     ModelInvalid,
+    RateLimitExceeded,
     RequestTimeoutError,
     TemporarilyBlocked,
     UsageLimitExceeded,
 )
-from .types import Candidate, Gem, GemJar, GeneratedImage, Image, ModelOutput, RPCData, WebImage
+from .types import Candidate, Gem, GemJar, GeneratedImage, GeneratedVideo, Image, ModelOutput, RPCData, WebImage
 from .utils import (
     load_netscape_cookies,
     load_netscape_cookies_as_dict,
@@ -27,11 +29,14 @@ __all__ = [
     "GeminiClient",
     "GeminiError",
     "GeneratedImage",
+    "GeneratedVideo",
     "Image",
+    "ImageGenerationBlocked",
     "ImageGenerationError",
     "ModelInvalid",
     "ModelOutput",
     "RPCData",
+    "RateLimitExceeded",
     "RequestTimeoutError",
     "TemporarilyBlocked",
     "UsageLimitExceeded",

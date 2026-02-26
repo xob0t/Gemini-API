@@ -85,64 +85,77 @@ class Image(BaseModel):
             if skip_invalid_filename:
                 return None
 
+        # Use image-specific headers that match browser behavior
         headers = {
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
             "Origin": "https://gemini.google.com",
             "Referer": "https://gemini.google.com/",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "cross-site",
         }
-        # Add authuser param for Google image URLs
         download_url = self.url
-        if "googleusercontent.com" in download_url and "?" not in download_url:
-            download_url += "?authuser=0"
 
         # Copy cookies with additional domains for Google image CDN
+        # Cookies are needed for the intermediate redirect to lh3.google.com
         download_cookies = Cookies()
         if cookies:
             if isinstance(cookies, dict):
-                # Dict cookies - set for both google.com and usercontent.google.com
+                # Dict cookies - set for google.com (covers lh3.google.com)
                 for name, value in cookies.items():
                     download_cookies.set(name, value, domain=".google.com")
-                    download_cookies.set(name, value, domain=".usercontent.google.com")
             elif hasattr(cookies, "jar"):
                 # Cookies object with jar attribute
                 for cookie in cookies.jar:
-                    download_cookies.set(cookie.name, cookie.value, domain=cookie.domain)
-                    if cookie.domain and "google.com" in cookie.domain:
-                        download_cookies.set(cookie.name, cookie.value, domain=".usercontent.google.com")
+                    if cookie.value is not None:
+                        download_cookies.set(cookie.name, cookie.value, domain=cookie.domain)
             else:
                 # Assume it's already a Cookies object, copy it
                 download_cookies = cookies
 
         async with AsyncClient(http2=True, follow_redirects=True, headers=headers, cookies=download_cookies, proxy=self.proxy) as client:
-            # Follow text-based redirect chain (Google returns URLs in response body)
+            # Google uses text-based redirects where the response body contains the next URL
+            # The redirect chain is:
+            # 1. lh3.googleusercontent.com/gg/... -> text/plain body with redirect URL (no cookies needed)
+            # 2. lh3.google.com/rd-gg/... -> text/plain body with redirect URL (COOKIES NEEDED!)
+            # 3. lh3.googleusercontent.com/rd-gg/... -> actual image (no cookies needed)
             current_url = download_url
             max_redirects = 5
             response = None
-            for _ in range(max_redirects):
+
+            for hop in range(max_redirects):
+                logger.debug(f"Image download hop {hop + 1}: {current_url[:80]}...")
                 response = await client.get(current_url)
+                logger.debug(f"  Status: {response.status_code}, Content-Type: {response.headers.get('content-type', 'N/A')}")
+
                 if response.status_code != 200:
+                    logger.debug(f"  Non-200 response, body: {response.text[:200] if response.text else 'N/A'}")
                     break
+
                 content_type = response.headers.get("content-type", "")
+
+                # If we got an image, we're done
                 if "image" in content_type:
+                    logger.debug(f"  Got image, size: {len(response.content)} bytes")
                     break
+
+                # If we got text/plain, the body contains the redirect URL
                 if content_type.startswith("text/plain"):
-                    # Response body contains redirect URL
                     new_url = response.text.strip()
+                    logger.debug(f"  Text redirect to: {new_url[:80]}...")
                     if new_url.startswith("http"):
                         current_url = new_url
-                    else:
-                        break
-                else:
-                    break
+                        continue
+
+                # Unknown content type, stop
+                logger.debug(f"  Unknown content type, stopping")
+                break
 
             if response is not None and response.status_code == 200 and "image" in response.headers.get("content-type", ""):
-                content_type = response.headers.get("content-type")
-                if content_type and "image" not in content_type:
-                    logger.warning(f"Content type of {filename} is not image, but {content_type}.")
+                dest_path = Path(path)
+                dest_path.mkdir(parents=True, exist_ok=True)
 
-                path = Path(path)
-                path.mkdir(parents=True, exist_ok=True)
-
-                dest = path / filename
+                dest = dest_path / filename
                 dest.write_bytes(response.content)
 
                 if verbose:
@@ -151,7 +164,7 @@ class Image(BaseModel):
                 return str(dest.resolve())
             else:
                 reason = getattr(response, "reason_phrase", None) or getattr(response, "reason", "") or ""
-                raise HTTPError(f"Error downloading image: {response.status_code} {reason}")
+                raise HTTPError(f"Error downloading image: {response.status_code if response else 'No response'} {reason}")
 
 
 class WebImage(Image):
@@ -217,8 +230,9 @@ class GeneratedImage(Image):
             Absolute path of the saved image if successfully saved.
         """
 
-        if full_size:
-            self.url += "=s2048"
+        # Build URL with size suffix
+        url_suffix = "=s2048" if full_size else ""
+        self.url += url_suffix
 
         return await super().save(
             path=path,

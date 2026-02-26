@@ -3,6 +3,7 @@ import html
 from pydantic import BaseModel, Field, field_validator
 
 from .image import GeneratedImage, Image, WebImage
+from .video import GeneratedVideo
 
 
 class Candidate(BaseModel):
@@ -21,6 +22,8 @@ class Candidate(BaseModel):
         List of web images in reply, can be empty.
     generated_images: `list[GeneratedImage]`, optional
         List of generated images in reply, can be empty
+    generated_videos: `list[GeneratedVideo]`, optional
+        List of generated videos in reply, can be empty
     """
 
     rcid: str
@@ -30,6 +33,7 @@ class Candidate(BaseModel):
     thoughts_delta: str | None = None
     web_images: list[WebImage] = Field(default_factory=list)
     generated_images: list[GeneratedImage] = Field(default_factory=list)
+    generated_videos: list[GeneratedVideo] = Field(default_factory=list)
 
     def __str__(self):
         return self.text
@@ -51,3 +55,7 @@ class Candidate(BaseModel):
     @property
     def images(self) -> list[Image]:
         return self.web_images + self.generated_images
+
+    @property
+    def videos(self) -> list[GeneratedVideo]:
+        return self.generated_videos

@@ -30,6 +30,15 @@ class GeminiError(Exception):
     pass
 
 
+class ImageGenerationBlocked(GeminiError):
+    """
+    Exception for when image generation is blocked due to authentication or regional restrictions.
+    This typically manifests as "Are you signed in?" or "image creation isn't available" messages.
+    """
+
+    pass
+
+
 class RequestTimeoutError(GeminiError):
     """
     Exception for request timeouts.
@@ -57,6 +66,15 @@ class ModelInvalid(GeminiError):
 class TemporarilyBlocked(GeminiError):
     """
     Exception for 429 Too Many Requests when IP is temporarily blocked.
+    """
+
+    pass
+
+
+class RateLimitExceeded(GeminiError):
+    """
+    Exception for when Gemini rejects a request due to too many requests.
+    This is indicated by responses like "I couldn't do that because I'm getting a lot of requests right now."
     """
 
     pass
