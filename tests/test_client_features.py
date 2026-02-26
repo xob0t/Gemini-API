@@ -1,11 +1,11 @@
 import logging
-import os
 import unittest
 from pathlib import Path
 
 from gemini_webapi import Gem, GeminiClient, logger, set_log_level
 from gemini_webapi.constants import Model
 from gemini_webapi.exceptions import AuthError, ModelInvalid, UsageLimitExceeded
+from gemini_webapi.utils import load_netscape_cookies_as_dict
 
 logging.getLogger("asyncio").setLevel(logging.ERROR)
 set_log_level("DEBUG")
@@ -13,12 +13,9 @@ set_log_level("DEBUG")
 
 class TestGeminiClient(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.geminiclient = GeminiClient(os.getenv("SECURE_1PSID"), os.getenv("SECURE_1PSIDTS"), verify=False)
-
-        try:
-            await self.geminiclient.init(auto_refresh=False)
-        except AuthError as e:
-            self.skipTest(e)
+        cookies = load_netscape_cookies_as_dict(Path(__file__).parent.parent / "cookies.txt", domain_filter=".google.com")
+        self.geminiclient = GeminiClient(cookies.get("__Secure-1PSID"), cookies.get("__Secure-1PSIDTS"))
+        await self.geminiclient.init(auto_refresh=False)
 
     @logger.catch(reraise=True)
     async def test_successful_request(self):
