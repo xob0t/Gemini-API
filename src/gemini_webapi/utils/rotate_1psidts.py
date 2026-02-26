@@ -81,6 +81,7 @@ async def rotate_1psidts(cookies: dict | Cookies, proxy: str | None = None) -> t
         new_1psidts = response.cookies.get("__Secure-1PSIDTS")
         if new_1psidts:
             cache_file.write_text(new_1psidts)
+            cache_file.chmod(0o600)  # Restrict cookie cache to owner read/write only
             return new_1psidts, response.cookies
 
         return None, response.cookies
