@@ -193,6 +193,31 @@ _IMAGE_GEN_BLOCKED_PATTERNS = [
     r"I can search for images, but can't.*create",
 ]
 
+# Video generation pending pattern - must contain the placeholder URL
+_VIDEO_GEN_PENDING_PATTERN = r"http://googleusercontent\.com/video_gen_chip/\d+"
+
+# Video generation rate limit / blocked patterns
+_VIDEO_GEN_BLOCKED_PATTERNS = [
+    r"can't generate more videos for you today",
+    r"come back tomorrow",
+    r"video generation isn't available",
+    r"unable to generate.*video",
+]
+
+# Video polling configuration
+_VIDEO_POLL_INTERVAL = 5.0  # seconds between polls
+_VIDEO_POLL_MAX_ATTEMPTS = 60  # max attempts (5 minutes total)
+
+
+def _is_video_generation_pending(text: str) -> bool:
+    """Check if the response indicates video generation is in progress (not blocked/rate-limited)."""
+    # First check if it's blocked/rate-limited
+    for pattern in _VIDEO_GEN_BLOCKED_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
+            return False
+    # Then check for the pending placeholder URL
+    return bool(re.search(_VIDEO_GEN_PENDING_PATTERN, text, re.IGNORECASE))
+
 
 def _check_rate_limit_response(text: str) -> None:
     """Check if the response text indicates a rate limit and raise exception if so."""
@@ -570,6 +595,28 @@ class GeminiClient(GemMixin):
             if output is None:
                 raise GeminiError("Failed to generate contents. No output data found in response.")
 
+            # Check if video generation is pending and poll for completion
+            if output.candidates:
+                for candidate in output.candidates:
+                    if candidate.text and _is_video_generation_pending(candidate.text):
+                        # Get conversation ID from chat metadata
+                        cid = None
+                        if isinstance(chat, ChatSession) and chat.metadata:
+                            cid = chat.metadata[0] if chat.metadata else None
+                        elif output.metadata:
+                            cid = output.metadata[0] if output.metadata else None
+
+                        if cid:
+                            logger.debug(f"Video generation pending, starting poll for cid={cid}")
+                            polled_videos = await self._poll_video_generation(cid, verbose=self.verbose)
+                            if polled_videos:
+                                # Add polled videos to the candidate
+                                candidate.generated_videos.extend(polled_videos)
+                                # Clean up the pending message from text
+                                candidate.text = re.sub(r"I'm generating your video.*?video is ready\.\n?", "", candidate.text, flags=re.IGNORECASE | re.DOTALL)
+                                candidate.text = re.sub(r"http://googleusercontent\.com/video_gen_chip/\d+\n?", "", candidate.text)
+                        break  # Only poll once per response
+
             if isinstance(chat, ChatSession):
                 output.metadata = chat.metadata
                 chat.last_output = output
@@ -673,6 +720,30 @@ class GeminiClient(GemMixin):
                 **kwargs,
             ):
                 yield output
+
+            # Check if video generation is pending and poll for completion
+            if output and output.candidates:
+                for candidate in output.candidates:
+                    if candidate.text and _is_video_generation_pending(candidate.text):
+                        # Get conversation ID from chat metadata
+                        cid = None
+                        if isinstance(chat, ChatSession) and chat.metadata:
+                            cid = chat.metadata[0] if chat.metadata else None
+                        elif output.metadata:
+                            cid = output.metadata[0] if output.metadata else None
+
+                        if cid:
+                            logger.debug(f"Video generation pending (stream), starting poll for cid={cid}")
+                            polled_videos = await self._poll_video_generation(cid, verbose=self.verbose)
+                            if polled_videos:
+                                # Add polled videos to the candidate
+                                candidate.generated_videos.extend(polled_videos)
+                                # Clean up the pending message from text
+                                candidate.text = re.sub(r"I'm generating your video.*?video is ready\.\n?", "", candidate.text, flags=re.IGNORECASE | re.DOTALL)
+                                candidate.text = re.sub(r"http://googleusercontent\.com/video_gen_chip/\d+\n?", "", candidate.text)
+                                # Yield final output with videos
+                                yield output
+                        break  # Only poll once per response
 
             if output and isinstance(chat, ChatSession):
                 output.metadata = chat.metadata
@@ -1080,6 +1151,87 @@ class GeminiClient(GemMixin):
             self.cookies.update(self.client.cookies)
 
         return response
+
+    async def _poll_video_generation(self, cid: str, verbose: bool = False) -> list[GeneratedVideo]:
+        """
+        Poll for video generation completion using READ_CHAT RPC.
+
+        Parameters
+        ----------
+        cid : str
+            Conversation ID (e.g., "c_27f6ab77b809248f")
+        verbose : bool
+            Whether to log polling progress
+
+        Returns
+        -------
+        list[GeneratedVideo]
+            List of generated videos when ready, empty list if polling times out
+        """
+        for attempt in range(_VIDEO_POLL_MAX_ATTEMPTS):
+            if verbose:
+                logger.debug(f"Polling for video generation (attempt {attempt + 1}/{_VIDEO_POLL_MAX_ATTEMPTS})...")
+
+            await asyncio.sleep(_VIDEO_POLL_INTERVAL)
+
+            try:
+                # Call READ_CHAT RPC to check video status
+                # Payload format: ["cid", 10, null, 1, [1], [4], null, 1]
+                payload = json.dumps([cid, 10, None, 1, [1], [4], None, 1]).decode("utf-8")
+                response = await self._batch_execute([RPCData(rpcid=GRPC.READ_CHAT, payload=payload)])
+
+                # Parse the response
+                response_text = response.text
+                if not response_text:
+                    continue
+
+                # Skip the ")]}'" prefix
+                if response_text.startswith(")]}'"):
+                    response_text = response_text[5:]
+
+                # Parse frames from response
+                parsed_parts, _ = parse_response_by_frame(response_text)
+
+                for part in parsed_parts:
+                    # Look for READ_CHAT response
+                    if get_nested_value(part, [1]) != GRPC.READ_CHAT:
+                        continue
+
+                    inner_json_str = get_nested_value(part, [2])
+                    if not inner_json_str:
+                        continue
+
+                    try:
+                        part_json = json.loads(inner_json_str)
+                    except json.JSONDecodeError:
+                        continue
+
+                    # Check if video is ready by looking for "Your video is ready"
+                    # The response structure: [[[[cid, rid], null, [...], [[[rcid, [text], ...]]]...]]]
+                    candidates = get_nested_value(part_json, [0, 0, 3], [])
+                    for candidate_data in candidates:
+                        text = get_nested_value(candidate_data, [1, 0], "")
+                        if "Your video is ready" in text or "video is ready" in text.lower():
+                            if verbose:
+                                logger.debug("Video generation completed!")
+                            # Parse videos from the candidate data
+                            videos = _parse_generated_videos(candidate_data, self.proxy, self.cookies, self.account_index, self.session_kwargs)
+                            if videos:
+                                return videos
+
+                        # Check if still generating
+                        if _is_video_generation_pending(text):
+                            if verbose:
+                                logger.debug("Video still generating...")
+                            break
+
+            except Exception as e:
+                if verbose:
+                    logger.debug(f"Polling error: {e}")
+                continue
+
+        logger.warning(f"Video generation polling timed out after {_VIDEO_POLL_MAX_ATTEMPTS * _VIDEO_POLL_INTERVAL} seconds")
+        return []
 
 
 class ChatSession:
