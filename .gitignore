@@ -204,3 +204,4 @@ Temporary Items
 .temp/
 *.har
 cookies.txt
+/temp
