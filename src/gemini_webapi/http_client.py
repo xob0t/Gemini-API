@@ -220,17 +220,10 @@ class StreamResponse:
         """
         Iterate over response bytes asynchronously.
 
-        curl_cffi's streaming works differently - we need to iterate over content.
+        Uses curl_cffi's native async content iterator for true streaming.
         """
-        # curl_cffi loads content when streaming, we yield it in chunks
-        content = self._response.content
-        if chunk_size is None:
-            chunk_size = 8192
-
-        for i in range(0, len(content), chunk_size):
-            yield content[i : i + chunk_size]
-            # Small yield to allow other tasks to run
-            await asyncio.sleep(0)
+        async for chunk in self._response.aiter_content():
+            yield chunk
 
     async def aiter_lines(self) -> AsyncIterator[str]:
         """Iterate over response lines asynchronously."""
