@@ -103,7 +103,8 @@ class Image(BaseModel):
 
                 return str(dest.resolve())
             else:
-                raise HTTPError(f"Error downloading image: {response.status_code} {response.reason_phrase}")
+                reason = getattr(response, "reason_phrase", None) or getattr(response, "reason", "") or ""
+                raise HTTPError(f"Error downloading image: {response.status_code} {reason}")
 
 
 class WebImage(Image):
