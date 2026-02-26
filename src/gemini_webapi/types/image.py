@@ -85,9 +85,38 @@ class Image(BaseModel):
             if skip_invalid_filename:
                 return None
 
-        async with AsyncClient(http2=True, follow_redirects=True, cookies=cookies, proxy=self.proxy) as client:
-            response = await client.get(self.url)
-            if response.status_code == 200:
+        headers = {
+            "Origin": "https://gemini.google.com",
+            "Referer": "https://gemini.google.com/",
+        }
+        # Add authuser param for Google image URLs
+        download_url = self.url
+        if "googleusercontent.com" in download_url and "?" not in download_url:
+            download_url += "?authuser=0"
+
+        async with AsyncClient(http2=True, follow_redirects=True, headers=headers, proxy=self.proxy) as client:
+            # Follow text-based redirect chain (Google returns URLs in response body)
+            current_url = download_url
+            max_redirects = 5
+            response = None
+            for _ in range(max_redirects):
+                response = await client.get(current_url)
+                if response.status_code != 200:
+                    break
+                content_type = response.headers.get("content-type", "")
+                if "image" in content_type:
+                    break
+                if content_type.startswith("text/plain"):
+                    # Response body contains redirect URL
+                    new_url = response.text.strip()
+                    if new_url.startswith("http"):
+                        current_url = new_url
+                    else:
+                        break
+                else:
+                    break
+
+            if response is not None and response.status_code == 200 and "image" in response.headers.get("content-type", ""):
                 content_type = response.headers.get("content-type")
                 if content_type and "image" not in content_type:
                     logger.warning(f"Content type of {filename} is not image, but {content_type}.")
