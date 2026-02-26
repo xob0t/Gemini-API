@@ -135,16 +135,22 @@ def _add_all_cached_cookie_tasks(
 
 
 def _extract_tokens_from_response(response_text: str) -> tuple[str | None, str | None, str | None]:
-    """Extract SNlM0e, cfb2h, and FdrFJe tokens from response HTML."""
-    snlm0e_match = re.search(r'"SNlM0e":\s*"(.*?)"', response_text)
-    if not snlm0e_match:
-        return None, None, None
+    """Extract SNlM0e, cfb2h, and FdrFJe tokens from response HTML.
 
+    Google removed SNlM0e from the page around Feb 2025, but cfb2h and FdrFJe
+    are still present and sufficient for API calls. Returns empty string for
+    SNlM0e if not found, which works correctly with the API.
+    """
+    snlm0e_match = re.search(r'"SNlM0e":\s*"(.*?)"', response_text)
     cfb2h_match = re.search(r'"cfb2h":\s*"(.*?)"', response_text)
     fdrfje_match = re.search(r'"FdrFJe":\s*"(.*?)"', response_text)
 
+    # Return None tuple if no tokens found at all
+    if not (snlm0e_match or cfb2h_match or fdrfje_match):
+        return None, None, None
+
     return (
-        snlm0e_match.group(1),
+        snlm0e_match.group(1) if snlm0e_match else "",
         cfb2h_match.group(1) if cfb2h_match else None,
         fdrfje_match.group(1) if fdrfje_match else None,
     )
@@ -207,7 +213,8 @@ async def get_access_token(
             response, request_cookies = await future
             snlm0e, cfb2h, fdrfje = _extract_tokens_from_response(response.text)
 
-            if snlm0e:
+            # Success if any token is found (SNlM0e was removed by Google around Feb 2025)
+            if snlm0e is not None or cfb2h or fdrfje:
                 if verbose:
                     logger.debug(f"Init attempt ({i + 1}/{len(tasks)}) succeeded. Initializing client...")
                 return snlm0e, cfb2h, fdrfje, request_cookies
