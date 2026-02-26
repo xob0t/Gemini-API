@@ -540,7 +540,7 @@ class GeminiClient(GemMixin):
                 ]
             )
 
-            uploaded_urls = await asyncio.gather(*(upload_file(file, self.proxy, session=self.client) for file in files))
+            uploaded_urls = await asyncio.gather(*(upload_file(file, self.proxy, session=self.client, account_index=self.account_index) for file in files))
             file_data = [[[url], parse_file_name(file)] for url, file in zip(uploaded_urls, files, strict=True)]
 
         try:
@@ -647,7 +647,7 @@ class GeminiClient(GemMixin):
                 ]
             )
 
-            uploaded_urls = await asyncio.gather(*(upload_file(file, self.proxy, session=self.client) for file in files))
+            uploaded_urls = await asyncio.gather(*(upload_file(file, self.proxy, session=self.client, account_index=self.account_index) for file in files))
             file_data = [[[url], parse_file_name(file)] for url, file in zip(uploaded_urls, files, strict=True)]
 
         try:

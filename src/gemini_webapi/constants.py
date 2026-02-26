@@ -6,7 +6,7 @@ class Endpoint(StrEnum):
     INIT = "https://gemini.google.com/app"
     GENERATE = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
     ROTATE_COOKIES = "https://accounts.google.com/RotateCookies"
-    UPLOAD = "https://content-push.googleapis.com/upload"
+    UPLOAD = "https://content-push.googleapis.com/upload"  # Legacy, use get_upload_url() instead
     BATCH_EXEC = "https://gemini.google.com/_/BardChatUi/data/batchexecute"
 
     @staticmethod
@@ -91,6 +91,25 @@ class Endpoint(StrEnum):
         prefix = Endpoint._get_account_prefix(account_index)
         return f"{prefix}/app"
 
+    @staticmethod
+    def get_upload_url(account_index: int = 0) -> str:
+        """
+        Get the file upload URL for a specific Google account.
+
+        Uses push.clients6.google.com with authuser parameter for multi-account support.
+
+        Parameters
+        ----------
+        account_index : int
+            Google account index (0-based).
+
+        Returns
+        -------
+        str
+            The full URL for file uploads with authuser parameter.
+        """
+        return f"https://push.clients6.google.com/upload/?authuser={account_index}"
+
 
 class GRPC(StrEnum):
     """
@@ -124,7 +143,7 @@ class Headers(Enum):
     ROTATE_COOKIES = {
         "Content-Type": "application/json",
     }
-    UPLOAD = {"Push-ID": "feeds/mcudyrk2a4khkz"}
+    # Note: UPLOAD headers are now defined in upload_file.py for the resumable upload protocol
 
 
 class Model(Enum):
