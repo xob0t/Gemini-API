@@ -94,7 +94,25 @@ class Image(BaseModel):
         if "googleusercontent.com" in download_url and "?" not in download_url:
             download_url += "?authuser=0"
 
-        async with AsyncClient(http2=True, follow_redirects=True, headers=headers, proxy=self.proxy) as client:
+        # Copy cookies with additional domains for Google image CDN
+        download_cookies = Cookies()
+        if cookies:
+            if isinstance(cookies, dict):
+                # Dict cookies - set for both google.com and usercontent.google.com
+                for name, value in cookies.items():
+                    download_cookies.set(name, value, domain=".google.com")
+                    download_cookies.set(name, value, domain=".usercontent.google.com")
+            elif hasattr(cookies, "jar"):
+                # Cookies object with jar attribute
+                for cookie in cookies.jar:
+                    download_cookies.set(cookie.name, cookie.value, domain=cookie.domain)
+                    if cookie.domain and "google.com" in cookie.domain:
+                        download_cookies.set(cookie.name, cookie.value, domain=".usercontent.google.com")
+            else:
+                # Assume it's already a Cookies object, copy it
+                download_cookies = cookies
+
+        async with AsyncClient(http2=True, follow_redirects=True, headers=headers, cookies=download_cookies, proxy=self.proxy) as client:
             # Follow text-based redirect chain (Google returns URLs in response body)
             current_url = download_url
             max_redirects = 5

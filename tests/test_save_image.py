@@ -14,7 +14,7 @@ class TestGeminiClient(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         cookies = load_netscape_cookies_as_dict(Path(__file__).parent.parent / "cookies.txt", domain_filter=".google.com")
         proxy = "http://localhost:8000"
-        self.geminiclient = GeminiClient(cookies.get("__Secure-1PSID"), cookies.get("__Secure-1PSIDTS"))
+        self.geminiclient = GeminiClient(cookies.get("__Secure-1PSID"), cookies.get("__Secure-1PSIDTS"), proxy=proxy)
         await self.geminiclient.init(auto_refresh=False)
 
     async def test_save_web_image(self):
