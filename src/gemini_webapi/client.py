@@ -107,7 +107,7 @@ def _parse_web_images(candidate_data: list[Any], proxy: str | None) -> list[WebI
     return web_images
 
 
-def _parse_generated_images(candidate_data: list[Any], proxy: str | None, cookies: Cookies) -> list[GeneratedImage]:
+def _parse_generated_images(candidate_data: list[Any], proxy: str | None, cookies: Cookies, account_index: int = 0) -> list[GeneratedImage]:
     """Extract generated images from candidate data."""
     generated_images = []
     for gen_img_data in get_nested_value(candidate_data, [12, 7, 0], []):
@@ -121,12 +121,13 @@ def _parse_generated_images(candidate_data: list[Any], proxy: str | None, cookie
                     alt=get_nested_value(gen_img_data, [3, 5, 0], ""),
                     proxy=proxy,
                     cookies=cookies,
+                    account_index=account_index,
                 )
             )
     return generated_images
 
 
-def _parse_generated_videos(candidate_data: list[Any], proxy: str | None, cookies: Cookies) -> list[GeneratedVideo]:
+def _parse_generated_videos(candidate_data: list[Any], proxy: str | None, cookies: Cookies, account_index: int = 0) -> list[GeneratedVideo]:
     """Extract generated videos from candidate data.
 
     Video data is found at [12, 59, 0, 0, 0] in the candidate response.
@@ -166,6 +167,7 @@ def _parse_generated_videos(candidate_data: list[Any], proxy: str | None, cookie
                     title=f"[Generated Video {video_num}]",
                     proxy=proxy,
                     cookies=cookies,
+                    account_index=account_index,
                 )
             )
 
@@ -228,6 +230,10 @@ class GeminiClient(GemMixin):
         __Secure-1PSIDTS cookie value, some Google accounts don't require this value, provide only if it's in the cookie list.
     proxy: `str`, optional
         Proxy URL.
+    account_index: `int`, optional
+        Google account index to use when multiple accounts are signed in.
+        Corresponds to the /u/{index}/ path in Google URLs (e.g., /u/0/, /u/1/, /u/2/).
+        Defaults to 0 (first account).
     kwargs: `dict`, optional
         Additional arguments which will be passed to the http client.
         Refer to `httpx.AsyncClient` for more information.
@@ -239,6 +245,7 @@ class GeminiClient(GemMixin):
         "_reqid",
         "_running",
         "access_token",
+        "account_index",
         "auto_close",
         "auto_refresh",
         "build_label",
@@ -261,11 +268,13 @@ class GeminiClient(GemMixin):
         secure_1psid: str | None = None,
         secure_1psidts: str | None = None,
         proxy: str | None = None,
+        account_index: int = 0,
         **kwargs,
     ):
         super().__init__()
         self.cookies = Cookies()
         self.proxy = proxy
+        self.account_index = account_index
         self._running: bool = False
         self.client: AsyncClient | None = None
         self.access_token: str | None = None
@@ -334,6 +343,7 @@ class GeminiClient(GemMixin):
                     proxy=self.proxy,
                     verbose=self.verbose,
                     verify=self.kwargs.get("verify", True),
+                    account_index=self.account_index,
                 )
 
                 self.client = AsyncClient(
@@ -734,7 +744,7 @@ class GeminiClient(GemMixin):
 
             async with self.client.stream(
                 "POST",
-                Endpoint.GENERATE,
+                Endpoint.get_generate_url(self.account_index),
                 params=params,
                 headers=model.model_header,
                 data=request_data,
@@ -924,8 +934,8 @@ class GeminiClient(GemMixin):
         thoughts = get_nested_value(candidate_data, [37, 0, 0]) or ""
 
         web_images = _parse_web_images(candidate_data, self.proxy)
-        generated_images = _parse_generated_images(candidate_data, self.proxy, self.cookies)
-        generated_videos = _parse_generated_videos(candidate_data, self.proxy, self.cookies)
+        generated_images = _parse_generated_images(candidate_data, self.proxy, self.cookies, self.account_index)
+        generated_videos = _parse_generated_videos(candidate_data, self.proxy, self.cookies, self.account_index)
 
         # Determine if this frame represents the final state
         flags.is_final_chunk = isinstance(get_nested_value(candidate_data, [2]), list) or get_nested_value(candidate_data, [8, 0], 1) == 2
@@ -1023,7 +1033,7 @@ class GeminiClient(GemMixin):
                 "rpcids": ",".join([p.rpcid for p in payloads]),
                 "_reqid": _reqid,
                 "rt": "c",
-                "source-path": "/app",
+                "source-path": Endpoint.get_source_path(self.account_index),
             }
             if self.build_label:
                 params["bl"] = self.build_label
@@ -1031,7 +1041,7 @@ class GeminiClient(GemMixin):
                 params["f.sid"] = self.session_id
 
             response = await self.client.post(
-                Endpoint.BATCH_EXEC,
+                Endpoint.get_batch_exec_url(self.account_index),
                 params=params,
                 data={
                     "at": self.access_token,

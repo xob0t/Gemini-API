@@ -184,9 +184,12 @@ class GeneratedImage(Image):
     cookies: `dict | httpx.Cookies`
         Cookies used for requesting the content of the generated image, inherit from GeminiClient object or manually set.
         Should contain valid "__Secure-1PSID" and "__Secure-1PSIDTS" values.
+    account_index: `int`, optional
+        Google account index for multi-account cookie support, by default 0.
     """
 
     cookies: dict[str, str] | Cookies
+    account_index: int = 0
 
     @field_validator("cookies", mode="after")
     @classmethod
@@ -230,9 +233,14 @@ class GeneratedImage(Image):
             Absolute path of the saved image if successfully saved.
         """
 
-        # Build URL with size suffix
+        # Build URL with size suffix and authuser parameter for multi-account support
         url_suffix = "=s2048" if full_size else ""
         self.url += url_suffix
+
+        # Add authuser parameter for multi-account support
+        if self.account_index > 0:
+            separator = "&" if "?" in self.url else "?"
+            self.url += f"{separator}authuser={self.account_index}"
 
         return await super().save(
             path=path,

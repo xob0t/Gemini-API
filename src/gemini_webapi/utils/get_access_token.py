@@ -10,7 +10,7 @@ from ..http_client import AsyncClient, Cookies, Response
 from .logger import logger
 
 
-async def send_request(cookies: dict | Cookies, proxy: str | None = None) -> tuple[Response | None, Cookies]:
+async def send_request(cookies: dict | Cookies, proxy: str | None = None, account_index: int = 0) -> tuple[Response | None, Cookies]:
     """Send http request with provided cookies."""
     async with AsyncClient(
         http2=True,
@@ -19,8 +19,18 @@ async def send_request(cookies: dict | Cookies, proxy: str | None = None) -> tup
         cookies=cookies,
         follow_redirects=True,
     ) as client:
-        response = await client.get(Endpoint.INIT)
+        init_url = Endpoint.get_init_url(account_index)
+        response = await client.get(init_url)
         response.raise_for_status()
+
+        # Check if redirected to consent page - means cookies are expired/invalid
+        final_url = str(response.url)
+        if "consent.google.com" in final_url:
+            raise AuthError(
+                f"Redirected to Google consent page. This typically means your cookies are expired or invalid "
+                f"for account index {account_index}. Please update your __Secure-1PSID and __Secure-1PSIDTS cookies."
+            )
+
         return response, client.cookies
 
 
@@ -52,6 +62,7 @@ def _add_base_cookie_task(
     extra_cookies: Cookies,
     proxy: str | None,
     verbose: bool,
+    account_index: int = 0,
 ) -> None:
     """Add task for base cookies if both required cookies are present."""
     has_psid = "__Secure-1PSID" in base_cookies
@@ -59,7 +70,7 @@ def _add_base_cookie_task(
 
     if has_psid and has_psidts:
         jar = _create_cookie_jar_with_base(extra_cookies, base_cookies)
-        tasks.append(Task(send_request(jar, proxy=proxy)))
+        tasks.append(Task(send_request(jar, proxy=proxy, account_index=account_index)))
     elif verbose:
         logger.debug("Skipping loading base cookies. Either __Secure-1PSID or __Secure-1PSIDTS is not provided.")
 
@@ -72,12 +83,13 @@ def _add_cached_cookie_tasks(
     secure_1psid: str | None,
     proxy: str | None,
     verbose: bool,
+    account_index: int = 0,
 ) -> None:
     """Add tasks for cached cookie files."""
     if secure_1psid:
-        _add_single_cached_cookie_task(tasks, base_cookies, extra_cookies, cache_dir, secure_1psid, proxy, verbose)
+        _add_single_cached_cookie_task(tasks, base_cookies, extra_cookies, cache_dir, secure_1psid, proxy, verbose, account_index)
     else:
-        _add_all_cached_cookie_tasks(tasks, extra_cookies, cache_dir, proxy, verbose)
+        _add_all_cached_cookie_tasks(tasks, extra_cookies, cache_dir, proxy, verbose, account_index)
 
 
 def _add_single_cached_cookie_task(
@@ -88,6 +100,7 @@ def _add_single_cached_cookie_task(
     secure_1psid: str,
     proxy: str | None,
     verbose: bool,
+    account_index: int = 0,
 ) -> None:
     """Add task for a specific cached cookie file matching the provided PSID."""
     cache_file = cache_dir / f".cached_1psidts_{secure_1psid}.txt"
@@ -105,7 +118,7 @@ def _add_single_cached_cookie_task(
 
     jar = _create_cookie_jar_with_base(extra_cookies, base_cookies)
     jar.set("__Secure-1PSIDTS", cached_1psidts, domain=".google.com")
-    tasks.append(Task(send_request(jar, proxy=proxy)))
+    tasks.append(Task(send_request(jar, proxy=proxy, account_index=account_index)))
 
 
 def _add_all_cached_cookie_tasks(
@@ -114,6 +127,7 @@ def _add_all_cached_cookie_tasks(
     cache_dir: Path,
     proxy: str | None,
     verbose: bool,
+    account_index: int = 0,
 ) -> None:
     """Add tasks for all valid cached cookie files."""
     valid_caches = 0
@@ -127,7 +141,7 @@ def _add_all_cached_cookie_tasks(
         psid = cache_file.stem[16:]  # Extract PSID from filename
         jar.set("__Secure-1PSID", psid, domain=".google.com")
         jar.set("__Secure-1PSIDTS", cached_1psidts, domain=".google.com")
-        tasks.append(Task(send_request(jar, proxy=proxy)))
+        tasks.append(Task(send_request(jar, proxy=proxy, account_index=account_index)))
         valid_caches += 1
 
     if valid_caches == 0 and verbose:
@@ -161,6 +175,7 @@ async def get_access_token(
     proxy: str | None = None,
     verbose: bool = False,
     verify: bool = True,
+    account_index: int = 0,
 ) -> tuple[str, str | None, str | None, Cookies]:
     """
     Send a get request to gemini.google.com for each group of available cookies and return
@@ -180,6 +195,10 @@ async def get_access_token(
         If `True`, will print more information in logs.
     verify: `bool`, optional
         Whether to verify SSL certificates.
+    account_index: `int`, optional
+        Google account index to use when multiple accounts are signed in.
+        Corresponds to the /u/{index}/ path in Google URLs (e.g., /u/0/, /u/1/, /u/2/).
+        Defaults to 0 (first account).
 
     Returns
     -------
@@ -201,8 +220,8 @@ async def get_access_token(
 
     # Collect authentication tasks from various sources
     tasks: list[Task] = []
-    _add_base_cookie_task(tasks, base_cookies, extra_cookies, proxy, verbose)
-    _add_cached_cookie_tasks(tasks, base_cookies, extra_cookies, cache_dir, secure_1psid, proxy, verbose)
+    _add_base_cookie_task(tasks, base_cookies, extra_cookies, proxy, verbose, account_index)
+    _add_cached_cookie_tasks(tasks, base_cookies, extra_cookies, cache_dir, secure_1psid, proxy, verbose, account_index)
 
     if not tasks:
         raise AuthError("No valid cookies available for initialization. Please pass __Secure-1PSID and __Secure-1PSIDTS manually.")

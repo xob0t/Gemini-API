@@ -9,6 +9,88 @@ class Endpoint(StrEnum):
     UPLOAD = "https://content-push.googleapis.com/upload"
     BATCH_EXEC = "https://gemini.google.com/_/BardChatUi/data/batchexecute"
 
+    @staticmethod
+    def _get_account_prefix(account_index: int) -> str:
+        """Get the account path prefix for URLs (e.g., '/u/2' or '')."""
+        return f"/u/{account_index}" if account_index > 0 else ""
+
+    @staticmethod
+    def get_init_url(account_index: int = 0) -> str:
+        """
+        Get the initialization URL for a specific Google account.
+
+        Parameters
+        ----------
+        account_index : int
+            Google account index (0-based). When multiple Google accounts are signed in,
+            this corresponds to the /u/{index}/ path in Google URLs.
+            - 0 = first account (default, equivalent to /u/0/ or just /app)
+            - 1 = second account (/u/1/app)
+            - 2 = third account (/u/2/app)
+            etc.
+
+        Returns
+        -------
+        str
+            The full URL to initialize the Gemini client for the specified account.
+        """
+        prefix = Endpoint._get_account_prefix(account_index)
+        return f"https://gemini.google.com{prefix}/app"
+
+    @staticmethod
+    def get_generate_url(account_index: int = 0) -> str:
+        """
+        Get the generate/streaming URL for a specific Google account.
+
+        Parameters
+        ----------
+        account_index : int
+            Google account index (0-based).
+
+        Returns
+        -------
+        str
+            The full URL for the StreamGenerate endpoint for the specified account.
+        """
+        prefix = Endpoint._get_account_prefix(account_index)
+        return f"https://gemini.google.com{prefix}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
+
+    @staticmethod
+    def get_batch_exec_url(account_index: int = 0) -> str:
+        """
+        Get the batch execute URL for a specific Google account.
+
+        Parameters
+        ----------
+        account_index : int
+            Google account index (0-based).
+
+        Returns
+        -------
+        str
+            The full URL for the batchexecute endpoint for the specified account.
+        """
+        prefix = Endpoint._get_account_prefix(account_index)
+        return f"https://gemini.google.com{prefix}/_/BardChatUi/data/batchexecute"
+
+    @staticmethod
+    def get_source_path(account_index: int = 0) -> str:
+        """
+        Get the source-path parameter value for a specific Google account.
+
+        Parameters
+        ----------
+        account_index : int
+            Google account index (0-based).
+
+        Returns
+        -------
+        str
+            The source-path value (e.g., '/app' or '/u/2/app').
+        """
+        prefix = Endpoint._get_account_prefix(account_index)
+        return f"{prefix}/app"
+
 
 class GRPC(StrEnum):
     """

@@ -30,6 +30,8 @@ class GeneratedVideo(BaseModel):
         Should contain valid "__Secure-1PSID" and "__Secure-1PSIDTS" values.
     proxy: `str`, optional
         Proxy used when downloading video.
+    account_index: `int`, optional
+        Google account index for multi-account cookie support, by default 0.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -39,6 +41,7 @@ class GeneratedVideo(BaseModel):
     title: str = "[Generated Video]"
     cookies: dict[str, str] | Cookies
     proxy: str | None = None
+    account_index: int = 0
 
     @field_validator("cookies", mode="after")
     @classmethod
@@ -95,13 +98,13 @@ class GeneratedVideo(BaseModel):
             "Referer": "https://gemini.google.com/",
         }
 
-        # Add authuser param for Google video URLs
+        # Add authuser param for Google video URLs (for multi-account support)
         download_url = self.url
         if "usercontent.google.com" in download_url and "authuser" not in download_url:
             if "?" in download_url:
-                download_url += "&authuser=0"
+                download_url += f"&authuser={self.account_index}"
             else:
-                download_url += "?authuser=0"
+                download_url += f"?authuser={self.account_index}"
 
         # Copy cookies with additional domains for Google video CDN
         download_cookies = Cookies()
