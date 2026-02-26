@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from http.cookiejar import CookieJar
 from typing import Any
 
-from curl_cffi import CurlHttpVersion
+from curl_cffi import CurlHttpVersion, CurlMime
 from curl_cffi.requests import AsyncSession, BrowserTypeLiteral, Cookies, Response
 
 
@@ -140,7 +140,12 @@ class AsyncClient:
         elif json is not None:
             return await session.post(url, headers=headers, json=json, **kwargs)
         elif files is not None:
-            return await session.post(url, headers=headers, files=files, **kwargs)
+            # curl_cffi requires multipart instead of files
+            # files is dict of {field_name: (filename, content)}
+            multipart = CurlMime()
+            for field_name, (filename, file_content) in files.items():
+                multipart.addpart(name=field_name, filename=filename, data=file_content)
+            return await session.post(url, headers=headers, multipart=multipart, **kwargs)
         elif data is not None:
             return await session.post(url, headers=headers, data=data, **kwargs)
         else:
