@@ -22,6 +22,7 @@ from .exceptions import (
     AuthError,
     GeminiError,
     ImageGenerationBlocked,
+    ImageModelMismatch,
     ModelInvalid,
     RateLimitExceeded,
     RequestTimeoutError,
@@ -68,6 +69,7 @@ class _StreamFlags:
     has_candidates: bool = False
     is_completed: bool = False
     is_final_chunk: bool = False
+    detected_image_model: str | None = None  # "pro" or "standard" when detected
 
 
 def _raise_for_error_code(error_code: int, model_name: str) -> None:
@@ -207,6 +209,27 @@ _VIDEO_GEN_BLOCKED_PATTERNS = [
 # Video polling configuration
 _VIDEO_POLL_INTERVAL = 5.0  # seconds between polls
 _VIDEO_POLL_MAX_ATTEMPTS = 60  # max attempts (5 minutes total)
+
+# Image model detection patterns
+# "Loading Nano Banana Pro..." or "Loading Nano Banana 2..." = Pro model
+# "Loading Nano Banana..." (without Pro/2) = Standard model
+_IMAGE_MODEL_PRO_PATTERN = r"loading\s+nano\s+banana\s+(pro|2)"
+_IMAGE_MODEL_STANDARD_PATTERN = r"loading\s+nano\s+banana\s*\.{3}"
+
+
+def _detect_image_model(text: str) -> str | None:
+    """Detect which image generation model is being used from the loading message.
+
+    Returns:
+        "pro" if Pro model detected, "standard" if standard model detected, None if not detected
+    """
+    # Check for Pro first (more specific)
+    if re.search(_IMAGE_MODEL_PRO_PATTERN, text, re.IGNORECASE):
+        return "pro"
+    # Then check for standard (ends with ... without Pro/2)
+    if re.search(_IMAGE_MODEL_STANDARD_PATTERN, text, re.IGNORECASE):
+        return "standard"
+    return None
 
 
 def _is_video_generation_pending(text: str) -> bool:
@@ -863,7 +886,7 @@ class GeminiClient(GemMixin):
 
                 got_update = False
                 for part in parsed_parts:
-                    result = await self._process_stream_part(part, model, chat, last_texts, last_thoughts, flags)
+                    result = await self._process_stream_part(part, model, chat, last_texts, last_thoughts, flags, use_pro)
                     if result:
                         yield result
                         got_update = True
@@ -884,7 +907,7 @@ class GeminiClient(GemMixin):
             if buffer:
                 parsed_parts, _ = parse_response_by_frame(buffer)
                 for part in parsed_parts:
-                    result = await self._process_stream_part(part, model, chat, last_texts, last_thoughts, flags)
+                    result = await self._process_stream_part(part, model, chat, last_texts, last_thoughts, flags, use_pro)
                     if result:
                         yield result
 
@@ -913,6 +936,7 @@ class GeminiClient(GemMixin):
         last_texts: dict[str, str],
         last_thoughts: dict[str, str],
         flags: _StreamFlags,
+        use_pro: bool = False,
     ) -> ModelOutput | None:
         """Process a single stream part and return ModelOutput if candidates found."""
         # Check for fatal error codes
@@ -921,11 +945,20 @@ class GeminiClient(GemMixin):
             await self.close()
             _raise_for_error_code(error_code, model.model_name)
 
-        # Detect thinking state
+        # Detect thinking state and image model
         if "data_analysis_tool" in str(part):
             flags.is_thinking = True
             if not flags.has_candidates:
                 logger.debug("Model is active (thinking/analyzing)...")
+
+            # Check for image model in data_analysis_tool message
+            # The message is at path [6][1][2] in the inner JSON or can be found in raw part
+            if flags.detected_image_model is None:
+                part_str = str(part)
+                detected = _detect_image_model(part_str)
+                if detected:
+                    flags.detected_image_model = detected
+                    logger.debug(f"Detected image model: {detected}")
 
         # Check for queueing status
         status = get_nested_value(part, [5])
@@ -966,6 +999,13 @@ class GeminiClient(GemMixin):
 
         if not output_candidates:
             return None
+
+        # Check for image model mismatch (user requested Pro but got standard)
+        if use_pro and flags.detected_image_model == "standard":
+            raise ImageModelMismatch(
+                "Requested Nano Banana Pro (use_pro=True) but Gemini loaded standard Nano Banana instead. "
+                "This may happen due to rate limiting or account restrictions. Try again later or use use_pro=False."
+            )
 
         flags.is_thinking = False
         flags.is_queueing = False

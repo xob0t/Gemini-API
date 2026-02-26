@@ -78,3 +78,12 @@ class RateLimitExceeded(GeminiError):
     """
 
     pass
+
+
+class ImageModelMismatch(GeminiError):
+    """
+    Exception for when the requested image model (Pro) was not used.
+    This happens when use_pro=True but Gemini loads the non-Pro model instead.
+    """
+
+    pass
